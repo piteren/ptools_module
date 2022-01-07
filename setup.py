@@ -12,7 +12,7 @@ setup(
         'Levenshtein==0.16.0',
         'matplotlib==3.3.3',
         'nltk==3.5',
-        'numpy==1.18.5',
+        'numpy==1.19.5',
         'pandas==1.1.5',
         'plotly==4.14.1',
         'psutil==5.9.0',

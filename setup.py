@@ -5,7 +5,10 @@ setup(
     url=                'https://github.com/piteren/ptools_module.git',
     author=             'Piotr Niewinski',
     author_email=       'pioniewinski@gmail.com',
-    packages=           ['ptools',],
+    packages=           [
+        'ptools',
+        'ptools.pms',
+        'ptools.pms.hpmser'],
     #version=            'v0.9',
     install_requires=   [
         'GPUtil==1.4.0',

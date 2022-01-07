@@ -6,7 +6,7 @@ setup(
     author=             'Piotr Niewinski',
     author_email=       'pioniewinski@gmail.com',
     packages=           ['ptools',],
-    version=            'v0.9',
+    #version=            'v0.9',
     install_requires=   [
         'GPUtil==1.4.0',
         'Levenshtein==0.16.0',

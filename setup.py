@@ -19,7 +19,7 @@ setup(
         'ptools.R4C.qlearning.qnn',
         'ptools.textools',
     ],
-    version=            'v0.9.1',
+    version=            'v0.9.2',
     install_requires=   [
         'GPUtil==1.4.0',
         'Levenshtein==0.16.0',

@@ -17,7 +17,7 @@ setup(
         'ptools.R4C.policy_gradients',
         'ptools.R4C.qlearning',
         'ptools.R4C.qlearning.qnn',
-        'ptools.R4C.textools',
+        'ptools.textools',
     ],
     version=            'v0.9.1',
     install_requires=   [

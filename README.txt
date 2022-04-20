@@ -1,5 +1,6 @@
 ptools Module project (for python 3.7)
 
+
 to install ptools as a module in your python project, use command like:
 pip install git+https://github.com/piteren/ptools_module.git#egg=ptools
 
@@ -20,3 +21,7 @@ git+https://github.com/piteren/ptools_module.git@master#egg=ptools
 
 # specify tag
 git+https://github.com/piteren/ptools_module.git@v0.9#egg=ptools
+
+
+to create annotated tag:
+git tag -a vX.X.X -m "annotation text"

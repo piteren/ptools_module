@@ -1,24 +1,12 @@
-from distutils.core import setup
+#from distutils.core import setup
+from setuptools import setup, find_packages
 
 setup(
     name=               'ptools',
     url=                'https://github.com/piteren/ptools_module.git',
     author=             'Piotr Niewinski',
     author_email=       'pioniewinski@gmail.com',
-    packages=           [
-        'ptools',
-        #'ptools.lipytools',
-        #'ptools.mpython',
-        #'ptools.neuralmess',
-        #'ptools.neuralmess.vext',
-        #'ptools.pms',
-        #'ptools.pms.hpmser',
-        #'ptools.R4C',
-        #'ptools.R4C.policy_gradients',
-        #'ptools.R4C.qlearning',
-        #'ptools.R4C.qlearning.qnn',
-        #'ptools.textools',
-    ],
+    packages=           find_packages(include=['ptools']),
     version=            'v0.9.2',
     install_requires=   [
         'GPUtil==1.4.0',

@@ -11,6 +11,7 @@ setup(
     packages=           find_packages(),
     version=            'v0.9.2',
     install_requires=   get_requirements(),
-    license=            'Creative Commons Attribution-Noncommercial-Share Alike license',
+    license=            'MIT',
+    license_files =     ('license.txt',),
     description=        'python tools (ptools) by piteren',
     long_description=   open('README.txt').read())

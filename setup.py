@@ -6,7 +6,7 @@ setup(
     url=                'https://github.com/piteren/ptools_module.git',
     author=             'Piotr Niewinski',
     author_email=       'pioniewinski@gmail.com',
-    packages=           find_packages(include=['ptools']),
+    packages=           find_packages(),
     version=            'v0.9.2',
     install_requires=   [
         'GPUtil==1.4.0',

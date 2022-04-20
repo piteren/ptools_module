@@ -12,6 +12,5 @@ setup(
     version=            'v0.9.2',
     install_requires=   get_requirements(),
     license=            'MIT',
-    license_files =     ('license.txt',),
-    description=        'python tools (ptools) by piteren',
-    long_description=   open('README.txt').read())
+    license_files =     ('LICENSE.txt',),
+    description=        'python tools (ptools) by piteren')

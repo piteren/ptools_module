@@ -1,5 +1,7 @@
-#from distutils.core import setup
 from setuptools import setup, find_packages
+
+from helpers import get_requirements
+
 
 setup(
     name=               'ptools',
@@ -8,22 +10,7 @@ setup(
     author_email=       'pioniewinski@gmail.com',
     packages=           find_packages(),
     version=            'v0.9.2',
-    install_requires=   [
-        'GPUtil==1.4.0',
-        'Levenshtein==0.16.0',
-        'matplotlib==3.3.3',
-        'nltk==3.5',
-        'numpy==1.19.5',
-        'pandas==1.1.5',
-        'plotly==4.14.1',
-        'psutil==5.9.0',
-        'regex==2020.11.13',
-        'rouge==1.0.0',
-        'scipy==1.5.4',
-        'sklearn==0.0',
-        'spacy==2.3.4',
-        'tensorflow==2.6.2',
-        'typing-extensions==3.7.4.3'],
+    install_requires=   get_requirements(),
     license=            'Creative Commons Attribution-Noncommercial-Share Alike license',
     description=        'python tools (ptools) by piteren',
     long_description=   open('README.txt').read())

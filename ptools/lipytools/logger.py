@@ -48,6 +48,6 @@ def set_logger(
         script_path = os.path.join(os.path.dirname(sys.argv[0]), os.path.basename(sys.argv[0]))
         print(f'\nLogger started..')
         print(f' > for script : {script_path}')
-        print(f' > logfile    : {logfile_path}\n')
+        print(f' > logfile    : {logfile_path}')
 
     return logfile_path

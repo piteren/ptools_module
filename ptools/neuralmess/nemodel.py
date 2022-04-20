@@ -2,66 +2,79 @@
 
  2019 (c) piteren
 
- NEModel class: wraps graph building functions: fwd_func & opt_func with some features
+ NEModel class:
+
+    Builds complete NN model object with implemented many features to effectively maintain components and procedures like:
+     graph, GPU resources, save & load (serialize), train/test baseline, TB, GX ..and many others.
 
     fwd_func:
-        - should build complete model forward graph (FWD) - from PH (placeholders) to loss
-        - function should return dict with: PH, tensors, variables lists
+        - should build complete model forward graph (FWD): from PH (placeholders) to loss tensor
+        - function should return a dict with: PH, tensors, variables lists
             - dict keys should meet naming policy
                 - list of special keys to consider while building fwd_func is under SPEC_KEYS
-                - OPT part will be build only if there is a "loss" tensor returned
+                - OPT part will be build only if there is a 'loss' tensor returned
                 - dict may contain variables_lists and single variable under keys with 'var' in name
                     - variables returned under 'train_vars' key are optimized (if 'train_vars' key is not present all trainable vars are optimized)
                     - sub-lists of variables will serve for separate savers (saved in subfolders)
-    opt_func - rather should not be replaced, but if you have to:
-        - should accept train_vars and gradients parameters
+    opt_func:
+        - rather should not be replaced, but if so then it should accept train_vars and gradients parameters
+        - should return 'optimizer'
 
-    model name is resolved
-        self_args_dict >> fwdf_mdict >> mdict >> timestamp
-
-    graph building params may come from (in order of overriding):
-        - NEModel defaults (like name, seed, ..)
+    NEModel manages params of self, FWD & OPT graph functions. Those params may come from different sources**:
+        - NEModel class init defaults
+        - OPT graph defaults
+        - FWD graph defaults
         - params saved in folder
-        - fwd_func & opt_func defaults
-        - given kwargs
+        - given kwargs (DNA)
+        ** name - must be given to NEModel
+        ** verb - similar (when not given is always set to 0)
 
-    - keeps graph params in self (dict)
-    - tensors, placeholders, etc... returned by graphs are also kept in self (dict) keys
-    - model objects (graph, session, saver ...) are kept as self fields
+    NEModel keeps all params in self as a Subscriptable. Objects like graph, session, saver, tensors, placeholders, etc.
+    created by NEModel or returned by graphs functions are also kept in self fields and may be easily accessed.
+
+    Since NEModelBase cannot distinguish its init defaults arguments from arguments given with kwargs
+    there is NEModel class that gots this knowledge and is responsible for proper resolution of all parameters.
 
  NEModel class implements:
-    - one folder for all model data (subfolder of save_TFD named with model name)
+    - one folder for all model data: DNA and checkpoints (subfolder of save_TFD named with model name)
+    - parameters management with proper resolution
     - logger (txt file saved into the model folder)
-    - GPU management with multi-GPU training (placement of model graph elements across devices)
-    - builds optimization (OPT) graph part
+    - GPU automated management with multi-GPU training on towers (places model graph elements across available devices)
+    - builds optimization (OPT) graph with default OPT function
         - calculates gradients for every tower >> averages them
         - AVT gradient clipping and scaled LR (warmup, annealing)
-    - MultiSaver (with option for saving sub-lists of variables into separate checkpoints)
+    - builds forward (FWD) graph with given function
+    - gots exemplary FWD graph function
+    - MultiSaver (with option of saving/loading sub-lists of variables (separate checkpoints with version management)
+    - inits session, TB writer, MultiSaver loads or inits variables
+    - ParaSave interface + with GXable interface, implements GX on checkpoints
+    - baseline methods for training / testing
     - sanity check of many graph elements and dependencies
-    - inits session, TB writer, MultiSaver loads variables (or inits them)
-    - self as dict with all model parameters, tensors, PH, session, savers
-    - baseline methods for training
 """
 
 import numpy as np
 import os
-from typing import Callable
+from typing import List, Optional, Callable
 import warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 from ptools.lipytools.logger import set_logger
-from ptools.lipytools.little_methods import get_defaults, short_scin, stamp,get_params
+from ptools.lipytools.little_methods import short_scin, stamp, get_params
 from ptools.lipytools.moving_average import MovAvg
 from ptools.mpython.mptools import DevicesParam
-from ptools.pms.paradict import ParaDict
+from ptools.mpython.mpdecor import proc_wait
+from ptools.pms.base_types import POINT
+from ptools.pms.subscriptable import Subscriptable
+from ptools.pms.parasave import ParaSave
 from ptools.neuralmess.get_tf import tf
-from ptools.neuralmess.base_elements import num_var_floats, lr_scaler, gc_loss_reductor, log_vars, mrg_ckpts
+from ptools.neuralmess.base_elements import num_var_floats, lr_scaler, gc_loss_reductor, log_vars, mrg_ckpts, TBwr
+from ptools.neuralmess.layers import lay_dense
 from ptools.neuralmess.dev_manager import tf_devices, mask_cuda
 from ptools.neuralmess.multi_saver import MultiSaver
 from ptools.neuralmess.batcher import Batcher
 
 
-# restricted keys for fwd_func mdict and return dict (if they appear in mdict, should be named exactly like below)
+# restricted keys for fwd_func DNA and return DNA (if they appear in kwargs, should be named exactly like below)
 SPEC_KEYS = [
     'name',                                             # model name
     'seed',                                             # seed for TF nad numpy
@@ -78,25 +91,63 @@ SPEC_KEYS = [
     'n_batches',                                        # number of batches for train
     'verb']                                             # fwd_func verbosity
 
-
-SAVE_TFD =          '_models'
+SAVE_TOPDIR =       '_models' # top folder of model save
 NEMODEL_DNA_PFX =   'nemodel_dna'
 
-# default NEModel function for optimization graph
+
+# default FWD function (forward graph), it is given as an exemplary implementation
+def fwd_graph(
+        name: str,
+        seq_len: int,
+        emb_num: int=   50,
+        emb_width: int= 100,
+        n_labels: int=  2,
+        seed: int=      321,
+        iLR=            0.003):
+    with tf.variable_scope(name):
+        in_PH = tf.placeholder(
+            name=           'in_PH',
+            dtype=          tf.int32,
+            shape=          [None, seq_len])
+        labels_PH = tf.placeholder(
+            name=           'labels_PH',
+            dtype=          tf.int32,
+            shape=          [None, 1])
+        emb = tf.get_variable( # some embeddings
+            name=       'emb',
+            shape=      [emb_num, emb_width],
+            dtype=      tf.float32)
+
+        feats = tf.nn.embedding_lookup(params=emb, ids=in_PH)
+        logits = lay_dense(
+            input=      feats,
+            units=      n_labels,
+            name=       'logits',
+            seed=       seed)
+        loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
+            labels= labels_PH,
+            logits= logits)
+    return {
+        'in_PH':    in_PH,
+        'emb':      emb,
+        'logits':   logits,
+        'loss':     loss}
+
+# default OPT function (optimization graph), should be used in most scenarios
 def opt_graph(
         train_vars,
         gradients,
-        opt_class=                  tf.train.AdamOptimizer, # default optimizer, other examples: tf.train.GradientDescentOptimizer, partial(tf.train.AdamOptimizer, beta1=0.7, beta2=0.7)
-        iLR=                        3e-4,
-        warm_up=                    None,
-        ann_base=                   None,
-        ann_step=                   1,
-        n_wup_off: float=           1,
-        avt_SVal=                   1,
-        avt_window=                 100,
-        avt_max_upd=                1.5,
-        do_clip=                    False,
-        verb=                       0):
+        opt_class=          tf.train.AdamOptimizer, # default optimizer, other examples: tf.train.GradientDescentOptimizer, partial(tf.train.AdamOptimizer, beta1=0.7, beta2=0.7)
+        iLR=                3e-4,
+        warm_up=            None,
+        ann_base=           None,
+        ann_step=           1,
+        n_wup_off: float=   1.0,
+        avt_SVal=           1,
+        avt_window=         100,
+        avt_max_upd=        1.5,
+        do_clip=            False,
+        verb=               0):
 
     g_step = tf.get_variable(  # global step variable
         name=           'g_step',
@@ -121,7 +172,7 @@ def opt_graph(
         n_wup_off=      n_wup_off,
         verb=           verb)['scaled_LR']
 
-    # updates with: optimizer, gg_norm, avt_gg_norm
+    # updates with: optimizer, gg_norm, gg_avt_norm
     loss_reductorD = gc_loss_reductor(
         optimizer=      opt_class(learning_rate=scaled_LR),
         vars=           train_vars,
@@ -149,186 +200,192 @@ def opt_graph(
     return rd
 
 
-class NEModel(dict):
+# NEModel Base class, implements most features (but not saving)
+class NEModelBase(Subscriptable):
 
     def __init__(
             self,
-            fwd_func,                               # function building forward graph (from PH to loss)
-            opt_func=                   opt_graph,  # function building OPT graph (from train_vars & gradients to optimizer)
-            devices: DevicesParam=      -1,         # check neuralmess.dev_manager.ft_devices for details
-            do_optimization: bool=      True,       # add optimization part to the graph (for training)
-            name_timestamp=             False,      # adds timestamp to name
-                # default train parameters, may be overridden by given with kwargs graph params
-            batch_size=                 64,
-            n_batches=                  1000,
-                # save
-            save_TFD: str=              SAVE_TFD,   # top folder of model_FD
-            savers_names: tuple=        (None,),    # names of savers for MultiSaver
-            load_saver: bool or str=    True,       # for None does not load, for True loads default
-            hpmser_mode: bool=          False,      # it will set model to be quiet and fast
-            read_only=                  False,      # sets model to be read only - will not save anything to folder
-            do_logfile=                 True,       # enables saving log file in save_TFD
-            do_TB=                      True,       # runs TensorBard
-            silent_TF_warnings=         False,      # turns off TF warnings
-                # GPU management
-            sep_device=                 True,       # separate first device for variables, gradients_avg, optimizer (otherwise those ar placed on the first FWD calculations tower)
-            collocate_GWO=              False,      # collocates gradient calculations with tf.OPs (gradients are calculated on every tower with its operations, but remember that vars are on one device...) (otherwise with first FWD calculations tower)
-            **kwargs):                              # here go all other params of graph (fwd / OPT)
+            name: str,
+            fwd_func: Callable=             fwd_graph,  # default function building forward (FWD) graph (from PH to loss)
+            opt_func: Optional[Callable]=   opt_graph,  # default function building optimization (OPT) graph (from train_vars & gradients to optimizer)
+            devices: DevicesParam=          -1,         # check neuralmess.dev_manager.ft_devices for details
+            seed=                           12321,      # default seed
+                # default train parameters, may be overridden by params given with graph kwargs
+            batch_size=                     64,
+            n_batches=                      1000,
+                # save checkpoint, logs, TB
+            save_topdir: str =              SAVE_TOPDIR,
+            savers_names: tuple=            (None,),    # names of savers for MultiSaver
+            load_saver: bool or str=        True,       # for None does not load, for True loads default
+            read_only=                      False,      # sets model to be read only - wont save ANYTHING (to folder)
+            do_logfile=                     True,       # enables saving log file in save_TFD
+            do_TB=                          True,       # runs TensorBard
+                # other
+            hpmser_mode: bool=              False,      # it will set model to be quiet and fast
+            silent_TF_warnings=             False,      # turns off TF warnings
+            sep_device=                     True,       # separate first device for variables, gradients_avg, optimizer (otherwise those ar placed on the first FWD calculations tower)
+            collocate_GWO=                  False,      # collocates gradient calculations with tf.OPs (gradients are calculated on every tower with its operations, but remember that vars are on one device...) (otherwise with first FWD calculations tower)
+            verb=                           0,
+            **kwargs):                              # here go params of FWD & OPT functions
 
-        dict.__init__(self) # init self as a dict
+        self.verb = verb
+        self.name = name
 
-        # hpmser_mode overrides
-        self.hpmser_mode = hpmser_mode
+        if self.verb>0: print(f'\n *** NEModelBase {self.name} (type: {type(self).__name__}) *** initializes...')
+
+        self.fwd_func =             fwd_func
+        self.opt_func =             opt_func
+        self.devices =              devices
+        self.seed=                  seed
+        # default train parameters
+        self.batch_size =           batch_size
+        self.n_batches =            n_batches
+        # save
+        self.save_topdir =          save_topdir
+        self.savers_names =         savers_names
+        self.load_saver =           load_saver
+        self.read_only =            read_only
+        self.do_logfile =           do_logfile
+        self.do_TB =                do_TB
+        # other
+        self.hpmser_mode =          hpmser_mode
+        self.silent_TF_warnings =   silent_TF_warnings
+        self.sep_device =           sep_device
+        self.collocate_GWO =        collocate_GWO
+
+        # hpmser_mode - early override
         if self.hpmser_mode:
-            kwargs['verb'] = 0
-            read_only = True
+            self.verb = 0
+            self.read_only = True
 
-        self.read_only = read_only
-        # read only overrides
+        # read only - early override
         if self.read_only:
-            do_logfile = False
-            do_TB = False
+            self.do_logfile = False
+            self.do_TB = False
 
-        self.do_TB = do_TB
-
-        self.verb = kwargs['verb'] if 'verb' in kwargs else 0
-
-        if silent_TF_warnings:
+        if self.silent_TF_warnings:
             tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
             warnings.filterwarnings('ignore')
 
-        if self.verb>0: print(f'\n *** NEModel (type: {type(self).__name__}) *** initializes...')
-
-        nemodel_args = {'name':'NEM', 'seed':12321} # NEModel default args
-
-        fwd_func_defaults = get_defaults(function=fwd_func) # params dict with defaults of fwd_func
-
-        # resolve model name (NEModel >> fwd_func_defaults >> mdict >> timestamp)
-        resolved_name =                 nemodel_args['name']
-        if 'name' in fwd_func_defaults: resolved_name =     fwd_func_defaults['name']
-        if 'name' in kwargs:            resolved_name =     kwargs['name']
-        if name_timestamp:              resolved_name +=    f'.{stamp()}'
-        self.name = resolved_name
-        kwargs['name'] = resolved_name
-        if self.verb>0: print(f' > NEModel name: {self.name}')
-
-        self.model_dir = f'{save_TFD}/{self.name}'
-        if self.verb>0: print(f' > NEModel dir: {self.model_dir}{" read only mode!" if self.read_only else ""}')
-
-        # ParaDict with empty dna, it gets dna from folder (if present)
-        folder_para_dict = ParaDict(
-            dna_TFD=    save_TFD,
-            dna_SFD=    self.name,
-            fn_pfx=     NEMODEL_DNA_PFX,
-            verb=       self.verb)
+        self.model_dir = f'{self.save_topdir}/{self.name}'
+        if self.verb>0: print(f' > NEModelBase dir: {self.model_dir}{" read only mode!" if self.read_only else ""}')
 
         # set logfile
-        if do_logfile:
+        if self.do_logfile:
             set_logger(
                 log_folder=     self.model_dir,
                 custom_name=    self.name,
                 verb=           self.verb)
 
-        # resolve graph_dna in proper order
-        self.__fwd_graph_dna = self.__get_func_dna(
-            func=               fwd_func,
-            nemodel_defaults=   nemodel_args,
-            dna_from_folder=    folder_para_dict,
-            user_dna=           kwargs)
-        if self.verb>0: print(f'\n > NEModel fwd_graph_dna : {self.__fwd_graph_dna}')
-        self.__opt_graph_dna = self.__get_func_dna(
-            func=               opt_func,
-            nemodel_defaults=   nemodel_args,
-            dna_from_folder=    folder_para_dict,
-            user_dna=           kwargs)
-        if self.verb>0: print(f' > NEModel opt_graph_dna : {self.__opt_graph_dna}')
+        # add OPT & FWD defaults under current self (it is assumed that current self + kwargs should be on top)
+        dna_self = self.get_point() # bake
+        self.update(get_params(self.opt_func)['with_defaults'] if self.opt_func else {})
+        self.update(get_params(self.fwd_func)['with_defaults'])
+        self.update(dna_self)
+        self.update(kwargs)
 
-        folder_para_dict.update(self.__fwd_graph_dna)
-        folder_para_dict.update(self.__opt_graph_dna)
+        # prepare OPT & FWD func dna
+        dna = self.get_point()
+        self.__opt_func_dna = NEModelBase.__get_func_dna(self.opt_func, dna)
+        self.__fwd_func_dna = NEModelBase.__get_func_dna(self.fwd_func, dna)
 
-        # train params will be saved in folder also
-        train_params = {
-            'batch_size':   batch_size,
-            'n_batches':    n_batches}
-        folder_para_dict.update(train_params)
-
-        # finally update with kwargs given by user not valid for fwd_func nor opt_func
+        # check for kwargs not valid for fwd_func nor opt_func
         not_used_kwargs = {}
         for k in kwargs:
-            if k not in self.__fwd_graph_dna and k not in self.__opt_graph_dna:
+            if k not in self.__fwd_func_dna and k not in self.__opt_func_dna:
                 not_used_kwargs[k] = kwargs[k]
-        if self.verb>0 and not_used_kwargs: print(f' > NEModel kwargs not used by any graph : {not_used_kwargs}')
-        folder_para_dict.update(not_used_kwargs)
 
-        folder_para_dict.check_params_sim(SPEC_KEYS)  # safety check
-        if not self.read_only: folder_para_dict.save()
+        if self.verb>0:
+            print(f'\n > NEModelBase opt_func_dna : {self.__opt_func_dna}')
+            print(f' > NEModelBase fwd_func_dna : {self.__fwd_func_dna}')
+            print(f' > NEModelBase kwargs not used by any graph : {not_used_kwargs}')
 
-        # finally update self
-        self.update(nemodel_args)
-        self.update(train_params)
-        self.update(not_used_kwargs)
-        self.update(self.__fwd_graph_dna)
-        self.update(self.__opt_graph_dna)
+        self.__TBwr = TBwr(logdir=self.model_dir)  # TensorBoard writer
+        self._gFWD = [] # list of dicts of all FWD graphs (from all devices)
+        self._graph = None
+        saver_vars = self.build_graph()
 
-        devices = tf_devices(devices, verb=self.verb)
+        self._session = None
+        self.__saver = None
+        self.final_init(saver_vars)
+
+        self._model_data = None
+        self._batcher = None
+
+    # prepares func sub-DNA given full DNA (wider)
+    @staticmethod
+    def __get_func_dna(
+            func: Optional[Callable],
+            dna: POINT) -> POINT:
+        if func is None: return {}
+        pms = get_params(func)
+        valid_keys = pms['without_defaults'] + list(pms['with_defaults'].keys())
+        func_dna = {k: dna[k] for k in dna if k in valid_keys} # filter to get only params accepted by func
+        return func_dna
+
+    # builds graph and surroundings
+    def build_graph(self) -> dict:
+
+        # ****************************************************************************************** resolve devices
+
+        self.devices = tf_devices(self.devices, verb=self.verb)
 
         # mask GPU devices
+        ids = []
         devices_other = []
         devices_gpu = []
-        for device in devices:
+        for device in self.devices:
             if 'GPU' in device: devices_gpu.append(device)
             else: devices_other.append(device)
-        # print(f'got GPU devices: {devices_gpu} and other: {devices_other}')
         if devices_gpu:
             ids = [dev[12:] for dev in devices_gpu]
-            # print('ids: {ids}')
-            mask_cuda(ids)
-            devices_gpu = [f'/device:GPU:{ix}' for ix in range(len(devices_gpu))]
-            # print(f'masked GPU devices: {devices_gpu}')
-        devices = devices_other + devices_gpu
+            devices_gpu = [f'/device:GPU:{ix}' for ix in range(len(devices_gpu))] # rewrite GPU devices
+        self.devices = devices_other + devices_gpu
+        if self.verb>0: print(f' > masking GPU devices: {ids}')
+        mask_cuda(ids)
 
         # report devices
         if self.verb>0:
             print()
-            if len(devices)==1:
-                if 'CPU' in devices[0]: print(f'NEModel builds CPU device setup')
-                else:                   print(f'NEModel builds single-GPU setup')
-            else:                       print(f'NEModel builds multi-dev setup for {len(devices)} devices')
+            if len(self.devices)==1:
+                if 'CPU' in self.devices[0]: print(f'NEModelBase builds CPU device setup')
+                else:                   print(f'NEModelBase builds single-GPU setup')
+            else:                       print(f'NEModelBase builds multi-dev setup for {len(self.devices)} devices')
 
-        if len(devices)<3: sep_device = False # SEP is available for 3 or more devices
+        if len(self.devices)<3: self.sep_device = False # SEP is available for 3 or more devices
 
         # build FWD graph(s) >> manage variables >> build OPT graph
-        self.gFWD = [] # list of dicts of all FWD graphs (from all devices)
-        self.graph = tf.Graph()
-        with self.graph.as_default():
+        self._gFWD = [] # list of dicts of all FWD graphs (from all devices)
+        self._graph = tf.Graph()
+        with self._graph.as_default():
 
             tf.set_random_seed(self['seed']) # set graph seed
             np.random.seed(self['seed'])
-            if self.verb>0: print(f'\nNEModel set TF & NP seed to {self["seed"]}')
+            if self.verb>0: print(f'\nNEModelBase set TF & NP seed to {self["seed"]}')
 
             # builds graph @SEP, this graph wont be run, it is only needed to place variables, if not vars_sep >> variables will be placed with first tower
-            if sep_device:
-                if self.verb>0: print(f'\nNEModel places VARs on {devices[0]}...')
-                with tf.device(devices[0]):
-                    fwd_func(**self.__fwd_graph_dna)
+            if self.sep_device:
+                if self.verb>0: print(f'\nNEModelBase places VARs on {self.devices[0]}...')
+                with tf.device(self.devices[0]):
+                    self.fwd_func(**self.__fwd_func_dna)
 
-            tower_devices = [] + devices
-            if sep_device: tower_devices = tower_devices[1:] # trim SEP
+            tower_devices = [] + self.devices
+            if self.sep_device: tower_devices = tower_devices[1:] # trim SEP
             for dev in tower_devices:
-                if self.verb>0: print(f'\nNEModel builds FWD graph @device: {dev}')
+                if self.verb>0: print(f'\nNEModelBase builds FWD graph @device: {dev}')
                 with tf.device(dev):
                     with tf.variable_scope('', reuse=tf.AUTO_REUSE):
-                        self.gFWD.append(fwd_func(**self.__fwd_graph_dna))
+                        self._gFWD.append(self.fwd_func(**self.__fwd_func_dna))
 
-            fwd_graph_return_dict = self.gFWD[0]
-            if self.verb>0: print(f'dictionary keys returned by fwd_func ({fwd_func.__name__}): {fwd_graph_return_dict.keys()}')
+            fwd_graph_return_dict = self._gFWD[0]
+            if self.verb>0: print(f'dictionary keys returned by fwd_func ({self.fwd_func.__name__}): {fwd_graph_return_dict.keys()}')
 
             self.update(fwd_graph_return_dict) # update self with fwd_graph_return_dict
 
             # get FWD variables returned by fwd_func (4 saver)
             train_vars = [] # variables to train
             saver_vars = {} # dict of variables to save
-            for key in self.keys():
+            for key in self.get_all_fields():
                 if 'var' in key.lower():
                     if key =='train_vars':
                         train_vars = self[key]
@@ -352,21 +409,18 @@ class NEModel(dict):
             else: saver_vars['fwd_vars'] = all_vars # put all
 
             if self.verb>0:
-                print('\nNEModel variables to save from fwd_func:')
+                print('\nNEModelBase variables to save from fwd_func:')
                 for key in sorted(list(saver_vars.keys())):
                     varList = saver_vars[key]
                     if varList: print(f' ### vars @{key} - num: {len(varList)}, floats: {short_scin(num_var_floats(varList))} ({varList[0].device})')
                     else: print(' ### no vars')
                     if self.verb>1: log_vars(varList)
 
-            if 'loss' not in self:
-                do_optimization = False
-                if self.verb>0: print('\nthere is no loss in FWD graph, OPT graph wont be build')
+            if 'loss' not in self: warnings.warn('NEModelBase: there is no loss in FWD graph, OPT graph wont be build!')
+            if not self.opt_func: print(f'\nNEModelBase: OPT graph wont be build since opt_func is not given')
 
-            if not do_optimization:
-                if self.verb>0: print('\nOPT graph wont be build')
             # build optimization graph
-            else:
+            if self.opt_func and 'loss' in self:
                 if self.verb>0: print(f'\nPreparing OPT part with {self["opt_class"]}')
                 # select trainable variables for OPT
                 all_tvars = tf.trainable_variables()
@@ -383,17 +437,17 @@ class NEModel(dict):
                     assert train_vars, 'ERR: there are no trainable variables at the graph!'
                 # log train_vars
                 if self.verb>0:
-                    print('\nNEModel trainable variables:')
+                    print('\nNEModelBase trainable variables:')
                     print(f' ### train_vars: {len(train_vars)} floats: {short_scin(num_var_floats(train_vars))}')
                     if self.verb>1: log_vars(train_vars)
 
                 # build gradients for towers
-                for ix in range(len(self.gFWD)):
-                    tower = self.gFWD[ix]
+                for ix in range(len(self._gFWD)):
+                    tower = self._gFWD[ix]
                     tower['gradients'] = tf.gradients(
                         ys=                             tower['loss'],
                         xs=                             train_vars,
-                        colocate_gradients_with_ops=    not collocate_GWO) # TF default is False >> calculates gradients where OPS, for True >> where train_vars
+                        colocate_gradients_with_ops=    not self.collocate_GWO) # TF default is False >> calculates gradients where OPS, for True >> where train_vars
 
                     # log gradients
                     if self.verb>0:
@@ -408,14 +462,14 @@ class NEModel(dict):
 
                         print(f' > gradients for {ix} tower got {nGrad} tensors ({device})')
                         if self.verb>1:
-                            print('NEModel variables and their gradients:')
+                            print('NEModelBase variables and their gradients:')
                             for gix in range(len(tower['gradients'])):
                                 grad = tower['gradients'][gix]
                                 var = train_vars[gix]
                                 print(var, var.device)
                                 print(f' > {grad}') # grad as a tensor displays device when printed (unless collocated with OP!)
 
-                self['gradients'] = self.gFWD[0]['gradients']
+                self['gradients'] = self._gFWD[0]['gradients']
 
                 # None @gradients check
                 none_grads = 0
@@ -425,11 +479,11 @@ class NEModel(dict):
                     print(f'There are None gradients: {none_grads}/{len(self["gradients"])}, some trainVars may be unrelated to loss, please check the graph!')
 
                 # average gradients
-                if len(devices) > 1:
+                if len(self.devices) > 1:
 
-                    if self.verb>0: print(f'\nNEModel builds gradients averaging graph with device {devices[0]} for {len(self.gFWD)} towers')
-                    with tf.device(devices[0]):
-                        towerGrads = [tower['gradients'] for tower in self.gFWD]
+                    if self.verb>0: print(f'\nNEModelBase builds gradients averaging graph with device {self.devices[0]} for {len(self._gFWD)} towers')
+                    with tf.device(self.devices[0]):
+                        towerGrads = [tower['gradients'] for tower in self._gFWD]
                         avgGrads = []
                         for mGrads in zip(*towerGrads):
                             grads = []
@@ -444,106 +498,75 @@ class NEModel(dict):
                             else: avgGrads.append(None)
 
                         self['gradients'] = avgGrads # update with averaged gradients
-                        if self.verb>0: print(f' > NEModel averaged gradients ({self["gradients"][0].device})')
+                        if self.verb>0: print(f' > NEModelBase averaged gradients ({self["gradients"][0].device})')
 
-                # build OPT graph
+                # finally build graph from elements
                 with tf.variable_scope('OPT', reuse=tf.AUTO_REUSE):
 
-                    if self.verb>0: print(f'\nBuilding OPT graph for {self.name} model @device: {devices[0]}')
-                    with tf.device(devices[0]):
+                    if self.verb>0: print(f'\nBuilding OPT graph for {self.name} model @device: {self.devices[0]}')
+                    with tf.device(self.devices[0]):
 
-                        opt_graph_return_dict = opt_func(
+                        opt_graph_return_dict = self.opt_func(
                             train_vars=     train_vars,
                             gradients=      self['gradients'],
-                            **self.__opt_graph_dna)
-                        if self.verb>0: print(f'dictionary keys returned by opt_func ({opt_func.__name__}): {opt_graph_return_dict.keys()}')
+                            **self.__opt_func_dna)
+                        if self.verb>0: print(f'dictionary keys returned by opt_func ({self.opt_func.__name__}): {opt_graph_return_dict.keys()}')
 
                         self.update(opt_graph_return_dict)  # update self with opt_graph_return_dict
 
                         saver_vars['opt_vars'] = self['opt_vars']
 
+        return saver_vars
+
+    def final_init(self, saver_vars: dict):
+
         config = tf.ConfigProto(allow_soft_placement=True)
         config.gpu_options.allow_growth = True
-        self.session = tf.Session(
-            graph=  self.graph,
+        self._session = tf.Session(
+            graph=  self._graph,
             config= config)
 
         # remove keys with no variables (corner case, for proper saver)
         sKeys = list(saver_vars.keys())
         for key in sKeys:
             if not saver_vars[key]: saver_vars.pop(key)
-        # TODO: saver_vars, savers_names, load_saver - need a little refactor!!!
         # add saver then load
         self.__saver = MultiSaver(
             model_name= self.name,
             vars=       saver_vars,
-            save_TFD=   save_TFD,
-            savers=     savers_names,
-            session=    self.session,
+            save_TFD=   self.save_topdir,
+            savers=     self.savers_names,
+            session=    self._session,
             verb=       self.verb)
-        if load_saver:
-            if type(load_saver) is bool: load_saver = None
-            self.__saver.load(saver=load_saver)
-            self.update_LR(self['iLR']) # safety update of iLR
 
-        self.__summ_writer = tf.summary.FileWriter(
-            logdir=         self.model_dir,
-            #graph=          self.graph, # you can call add_graph() later
-            flush_secs=     10) if self.do_TB else None
+        if self.load_saver: self.load_ckpt()
 
-        self.model_data = None
-        self.batcher = None
+        if self.verb>0: print(f'{self.name} (NEModelBase) graph built!')
+        if self.verb>1: print(f' > self point:\n{self.get_point()}')
+        if self.verb>1: print(f' > self all fields:\n{self.get_all_fields()}')
 
-        if self.verb>0: print(f'{self.name} (NEModel) build finished!')
-        if self.verb>2: print(self)
+    # reloads model checkpoint, updates iLR
+    def load_ckpt(self):
+        saver = None if type(self.load_saver) is bool else self.load_saver
+        self.__saver.load(saver=saver)
+        if 'iLR' in self: self.update_LR(self['iLR'])
 
-    # resolves func dna in proper order
-    def __get_func_dna(
-            self,
-            func: Callable,
-            nemodel_defaults: dict,
-            dna_from_folder: dict,
-            user_dna: dict):
-
-        func_args = get_params(func)
-        func_args_without_defaults = func_args['without_defaults']
-        func_args_with_defaults = func_args['with_defaults']
-        if self.verb>1:
-            print(f' >> function {func.__name__} args:')
-            print(f' >> without defaults: {func_args_without_defaults}')
-            print(f' >> with defaults   : {func_args_with_defaults}')
-            print(f' >> given:')
-            print(f' >> NEModel_defaults: {nemodel_defaults}')
-            print(f' >> dna_from_folder : {dna_from_folder}')
-            print(f' >> user_dna        : {user_dna}')
-
-        _dna = {}
-        _dna.update(nemodel_defaults)           # 1 update with params defined by NEModel
-        _dna.update(func_args_with_defaults)    # 2 update with defaults of func
-        _dna.update(dna_from_folder)            # 3 update with params from folder
-        _dna.update(user_dna)                   # 4 update with user params
-
-        func_dna = {k: _dna[k] for k in _dna if k in func_args_without_defaults or k in func_args_with_defaults} # filter to get only params accepted by func
-        return func_dna
-
-    def __str__(self): return ParaDict.dict_2str(self)
-
-    def save(self):
-        assert not self.read_only, f'ERR: cannot save NEModel {self.name} while model is readonly!'
+    # saves model checkpoint
+    def save_ckpt(self):
+        assert not self.read_only, f'ERR: cannot save NEModelBase {self.name} while model is readonly!'
         self.__saver.save()
 
-    # reloads model checkpoint
-    def load(self):
-        self.__saver.load()
-
     # updates base LR (iLR) in graph - but not saves it to the checkpoint
-    def update_LR(self, lr):
-        if 'iLR_var' not in self: print('NEModel: There is no LR variable in graph to update')
+    def update_LR(self, lr: Optional):
+        if 'iLR_var' not in self:
+            if self.verb>1: print('NEModelBase: There is no LR variable in graph to update')
         else:
-            self['iLR'] = lr
-            self.session.run(tf.assign(ref=self['iLR_var'], value=lr))
-
-    def get_summ_writer(self): return self.__summ_writer
+            if lr is not None:
+                old = self['iLR']
+                self['iLR'] = lr
+                if self.verb>1: print(f'NEModelBase {self.name} updated iLR from {old} to {self["iLR"]}')
+            self._session.run(tf.assign(ref=self['iLR_var'], value=self['iLR']))
+            if self.verb>1: print(f'NEModelBase {self.name} updated iLR_var (graph variable) with iLR: {self["iLR"]}')
 
     # logs value to TB
     def log_TB(
@@ -551,51 +574,20 @@ class NEModel(dict):
             value,
             tag: str,
             step: int):
-        assert self.__summ_writer, f'ERR: can not log_TB since there is no summ_writer in NEModel {self.name}'
-        vsumm = tf.Summary(value=[tf.Summary.Value(tag=tag, simple_value=value)])
-        self.__summ_writer.add_summary(vsumm, step)
+        if self.do_TB: self.__TBwr.add(value=value, tag=tag, step=step)
+        else: warnings.warn(f'NEModelBase {self.name} cannot log TensorBoard since do_TB flag is False!')
 
-    # copies NEModel folder (dna & checkpoints)
+    # GX for two NEModelBase checkpoints
     @staticmethod
-    def copy_nemodel_FD(
-            name_S: str,
-            name_T: str,
-            folder_S: str=  SAVE_TFD,
-            folder_T: str=  SAVE_TFD):
-
-        # copy dna
-        ParaDict.copy_dnaFD(
-            dna_SFD_S=  name_S,
-            dna_SFD_T=  name_T,
-            top_FD_S=   folder_S,
-            top_FD_T=   folder_T,
-            fn_pfx=     NEMODEL_DNA_PFX)
-
-        # copy checkpoints
-        nm_SFD = f'{folder_S}/{name_S}'
-        ckptL = [cfd for cfd in os.listdir(nm_SFD) if os.path.isdir(os.path.join(nm_SFD, cfd))]
-        if 'opt_vars' in ckptL: ckptL.remove('opt_vars')
-        for ckpt in ckptL:
-            mrg_ckpts(
-                ckptA=          ckpt,
-                ckptA_FD=       nm_SFD,
-                ckptB=          None,
-                ckptB_FD=       None,
-                ckptM=          ckpt,
-                ckptM_FD=       f'{folder_T}/{name_T}',
-                replace_scope=  name_T)
-
-    # GX for two NEModels
-    @staticmethod
-    def do_GX(
-            name_A: str,                    # name parent A
-            name_B: str,                    # name parent B
-            name_child: str,                # name child
-            folder_A: str=      SAVE_TFD,
-            folder_B: str=      None,
-            folder_child: str=  None,
-            ratio: float=       0.5,
-            noise: float=       0.03):
+    def gx_ckpt(
+            name_A: str,                        # name parent A
+            name_B: str,                        # name parent B
+            name_child: str,                    # name child
+            folder_A: str=                  SAVE_TOPDIR,
+            folder_B: Optional[str]=        None,
+            folder_child: Optional[str]=    None,
+            ratio: float=                   0.5,
+            noise: float=                   0.03):
 
         if not folder_B: folder_B = folder_A
         if not folder_child: folder_child = folder_A
@@ -613,29 +605,32 @@ class NEModel(dict):
                 ckptM=          ckpt,
                 ckptM_FD=       f'{folder_child}/{name_child}/',
                 replace_scope=  name_child,
-                mrgF=           ratio,
-                noiseF=         noise)
+                ratio=          ratio,
+                noise=          noise)
 
-    # ************************************************************************************************ training baseline
+    # **************************************************************************************** baseline training methods
 
     # loads model data for training, dict should have at least 'train':{} for Batcher
     def load_model_data(self) -> dict:
-        raise NotImplementedError('NEModel.load_model_data() should be overridden!')
+        warnings.warn('NEModelBase.load_model_data() should be overridden!')
+        return {}
 
-    # pre training method - may be overridden
+    # pre (before) training method - may be overridden
     def pre_train(self):
-        self.model_data = self.load_model_data()
-        self.batcher = Batcher(
-            data_TR=    self.model_data['train'],
-            data_VL=    self.model_data['valid'] if 'valid' in self.model_data else None,
-            data_TS=    self.model_data['test'] if 'test' in self.model_data else None,
+        self._model_data = self.load_model_data()
+        self._batcher = Batcher(
+            data_TR=    self._model_data['train'],
+            data_VL=    self._model_data['valid'] if 'valid' in self._model_data else None,
+            data_TS=    self._model_data['test'] if 'test' in self._model_data else None,
             batch_size= self['batch_size'],
             btype=      'random_cov',
             verb=       self.verb)
 
     # builds feed dict from given batch of data
     def build_feed(self, batch: dict, train=True) -> dict:
-        raise NotImplementedError('NEModel.build_feed() should be overridden!')
+        warnings.warn('NEModelBase.build_feed() should be overridden!')
+        return {}
+
 
     # training method, saves max
     def train(
@@ -662,21 +657,21 @@ class NEModel(dict):
 
         while batch_IX < self['n_batches']:
             batch_IX += 1
-            batch = self.batcher.get_batch()
+            batch = self._batcher.get_batch()
 
             feed = self.build_feed(batch)
             fetches = self['optimizer']
-            if self.do_TB or self.verb>0: fetches = [self['optimizer'], self['loss'], self['acc'], self['gg_norm'], self['avt_gg_norm']]
+            if self.do_TB or self.verb>0: fetches = [self['optimizer'], self['loss'], self['acc'], self['gg_norm'], self['gg_avt_norm']]
 
-            run_out = self.session.run(fetches, feed)
+            run_out = self._session.run(fetches, feed)
 
             if self.do_TB or self.verb>0:
-                _, loss, acc, gg_norm, avt_gg_norm = run_out
+                _, loss, acc, gg_norm, gg_avt_norm = run_out
                 if self.do_TB:
                     self.log_TB(value=loss,        tag='tr/loss',    step=batch_IX)
                     self.log_TB(value=acc,         tag='tr/acc',     step=batch_IX)
                     self.log_TB(value=gg_norm,     tag='tr/gn',      step=batch_IX)
-                    self.log_TB(value=avt_gg_norm, tag='tr/gn_avt',  step=batch_IX)
+                    self.log_TB(value=gg_avt_norm, tag='tr/gn_avt',  step=batch_IX)
                 tr_lssL.append(loss)
                 tr_accL.append(acc)
 
@@ -694,7 +689,7 @@ class NEModel(dict):
 
                 if ts_acc > ts_acc_max:
                     ts_acc_max = ts_acc
-                    if not self.read_only and save: self.save() # model is saved for max_ts_acc
+                    if not self.read_only and save: self.save_ckpt() # model is saved for max_ts_acc
 
         # weighted test value for last 10% test results
         ts_results = ts_results[-ten_factor:]
@@ -715,13 +710,202 @@ class NEModel(dict):
         return ts_wval
 
     def test(self):
-        batches = self.batcher.get_TS_batches()
+        batches = self._batcher.get_TS_batches()
         acc_loss = []
         acc_acc = []
         for batch in batches:
             feed = self.build_feed(batch, train=False)
             fetches = [self['loss'], self['acc']]
-            loss, acc = self.session.run(fetches, feed)
+            loss, acc = self._session.run(fetches, feed)
             acc_loss.append(loss)
             acc_acc.append(acc)
         return sum(acc_acc)/len(acc_acc), sum(acc_loss)/len(acc_loss)
+
+    @property
+    def gFWD(self):
+        return self._gFWD
+
+    @property
+    def session(self):
+        return self._session
+
+    @property
+    def tbwr(self):
+        return self.__TBwr
+
+    def __str__(self):
+        return ParaSave.dict_2str(self.get_point())
+
+
+# adds save management for NEModelBase, resolves attributes of NEModelBase init
+class NEModel(NEModelBase, ParaSave):
+
+    def __init__(
+            self,
+            name: str,
+            name_timestamp=     False,                  # adds timestamp to model name
+            save_topdir: str=   SAVE_TOPDIR,
+            save_fn_pfx: str=   NEMODEL_DNA_PFX,
+            verb=               0,
+            **kwargs):
+
+        self.verb = verb
+        self.name = name
+        if name_timestamp: self.name += f'.{stamp()}'
+        if self.verb>0: print(f'\n *** NEModel {self.name} (type: {type(self).__name__}) *** initializes...')
+
+        self.save_topdir = save_topdir
+        self.save_fn_pfx = save_fn_pfx
+
+        # ******************************************************* collect DNA from different sources and build final DNA
+
+        dna_nemodelbase_def = get_params(NEModelBase.__init__)['with_defaults']
+        dna_self = {k: self[k] for k in self.get_all_fields()} # INFO: cannot use get_point here since self.__managed_params not established yet
+        dna_saved = ParaSave.load_dna(name=self.name, save_topdir=self.save_topdir, save_fn_pfx=self.save_fn_pfx)
+
+        # look for functions, override in proper order
+        dna_func = {}
+        for k in ['fwd_func','opt_func']:
+            val = dna_nemodelbase_def[k]            # first get from NEModelBase.__init__ defaults
+            if k in kwargs: val = kwargs[k]         # then override if given
+            if k in dna_saved: val = dna_saved[k]   # then take from saved
+            dna_func[k] = val
+        self.update(dna_func)
+
+        dna_opt_func = get_params(self.opt_func)['with_defaults'] if self.opt_func else {}
+        dna_fwd_func = get_params(self.fwd_func)['with_defaults']
+
+        if self.verb>0:
+            print(f'\n > NEModel DNA sources:')
+            print(f' >> NEModelBase init defaults: {dna_nemodelbase_def}')
+            print(f' >> OPT func defaults:         {dna_opt_func}')
+            print(f' >> FWD func defaults:         {dna_fwd_func}')
+            print(f' >> DNA saved:                 {dna_saved}')
+            print(f' >> NEModel DNA:               {dna_self}')
+            print(f' >> graph functions:           {dna_func}')
+            print(f' >> given kwargs:              {kwargs}')
+
+        self.update(dna_nemodelbase_def)                # update with NEModelBase defaults
+        self.update(dna_opt_func)                       # update with OPT func defaults
+        self.update(dna_fwd_func)                       # update with FWD func defaults
+        self.update(dna_saved)                          # update with saved DNA
+        self.update(dna_self)                           # update with early self DNA (should not be updated by any of above)
+        self.update(dna_func)                           # update with functions
+        self.update(kwargs)                             # update with given kwargs
+
+        self.__managed_params = self.get_all_fields()   # save managed params here, graph will add many params that we do not want to be managed
+        self.check_params_sim(SPEC_KEYS)                # safety check
+
+        dna = self.get_point()
+        if self.verb>0: print(f'\n > NEModel complete DNA: {dna}')
+        ParaSave.__init__(self, **dna)
+        NEModelBase.__init__(self, **dna)
+
+    def get_managed_params(self) -> List[str]: return self.__managed_params
+
+    # copies full NEModel folder (DNA & checkpoints)
+    @staticmethod
+    def copy_saved(
+            name_src: str,
+            name_trg: str,
+            save_topdir_src: str,
+            save_topdir_trg: Optional[str]= None,
+            save_fn_pfx: str=               NEMODEL_DNA_PFX):
+
+        if save_topdir_trg is None: save_topdir_trg = save_topdir_src
+
+        # copy DNA with ParaSave
+        ParaSave.copy_saved_dna(
+            name_src=           name_src,
+            name_trg=           name_trg,
+            save_topdir_src=    save_topdir_src,
+            save_topdir_trg=    save_topdir_trg,
+            save_fn_pfx=        save_fn_pfx)
+
+        # copy checkpoints
+        nm_SFD = f'{save_topdir_src}/{name_src}'
+        ckptL = [cfd for cfd in os.listdir(nm_SFD) if os.path.isdir(os.path.join(nm_SFD, cfd))]
+        if 'opt_vars' in ckptL: ckptL.remove('opt_vars')
+        for ckpt in ckptL:
+            mrg_ckpts(
+                ckptA=          ckpt,
+                ckptA_FD=       nm_SFD,
+                ckptB=          None,
+                ckptB_FD=       None,
+                ckptM=          ckpt,
+                ckptM_FD=       f'{save_topdir_trg}/{name_trg}',
+                replace_scope=  name_trg)
+
+    # performs GX on saved NEModel objects (NEModel as a ParaSave and then checkpoints, without even building child objects)
+    @staticmethod
+    def gx_saved_dna(
+            name_parent_main: str,
+            name_parent_scnd: str,
+            name_child: str,
+            save_topdir_parent_main: str,                                   # ParaSave top directory
+            save_topdir_parent_scnd: Optional[str] =    None,               # ParaSave top directory of parent scnd
+            save_topdir_child: Optional[str] =          None,               # ParaSave top directory of child
+            save_fn_pfx: Optional[str] =                NEMODEL_DNA_PFX     # ParaSave dna filename prefix
+    ) -> None:
+        ParaSave.gx_saved_dna(
+            name_parent_main=           name_parent_main,
+            name_parent_scnd=           name_parent_scnd,
+            name_child=                 name_child,
+            save_topdir_parent_main=    save_topdir_parent_main,
+            save_topdir_parent_scnd=    save_topdir_parent_scnd,
+            save_topdir_child=          save_topdir_child,
+            save_fn_pfx=                save_fn_pfx)
+        NEModel.gx_ckpt(
+            name_A=         name_parent_main,
+            name_B=         name_parent_scnd,
+            name_child=     name_child,
+            folder_A=       save_topdir_parent_main,
+            folder_B=       save_topdir_parent_scnd,
+            folder_child=   save_topdir_child)
+
+    # performs GX on saved NEModel objects, adds more control for ckpt GX
+    @staticmethod
+    def gx_saved_dna_cc(
+            name_parent_main: str,
+            name_parent_scnd: str,
+            name_child: str,
+            save_topdir_parent_main: str,                                   # ParaSave top directory
+            save_topdir_parent_scnd: Optional[str] =    None,               # ParaSave top directory of parent scnd
+            save_topdir_child: Optional[str] =          None,               # ParaSave top directory of child
+            save_fn_pfx: Optional[str] =                NEMODEL_DNA_PFX,    # ParaSave dna filename prefix
+            do_gx_ckpt=                                 True,
+            ratio: float=                               0.5,
+            noise: float=                               0.03
+    ) -> None:
+
+        # build NEModel and save its ckpt in a separate subprocess
+        @proc_wait
+        def save(name_child:str, save_topdir:str):
+            nm = NEModel(name=name_child, save_topdir=save_topdir)
+            nm.save_ckpt()
+
+        ParaSave.gx_saved_dna(
+            name_parent_main=           name_parent_main,
+            name_parent_scnd=           name_parent_scnd,
+            name_child=                 name_child,
+            save_topdir_parent_main=    save_topdir_parent_main,
+            save_topdir_parent_scnd=    save_topdir_parent_scnd,
+            save_topdir_child=          save_topdir_child,
+            save_fn_pfx=                save_fn_pfx)
+
+        if do_gx_ckpt:
+            NEModel.gx_ckpt(
+                name_A=         name_parent_main,
+                name_B=         name_parent_scnd,
+                name_child=     name_child,
+                folder_A=       save_topdir_parent_main,
+                folder_B=       save_topdir_parent_scnd,
+                folder_child=   save_topdir_child,
+                ratio=          ratio,
+                noise=          noise)
+        else: save(name_child=name_child, save_topdir=save_topdir_child or save_topdir_parent_main)
+
+    # saves NEModel (ParaSave DNA and checkpoint)
+    def save(self):
+        ParaSave.save_dna(self)
+        self.save_ckpt()

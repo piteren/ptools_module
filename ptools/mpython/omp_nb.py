@@ -77,7 +77,7 @@ class OMPRunnerNB:
                 break_loop = False # flag to break this loop
 
                 # to allow poison to be received while tasks still present
-                qd = self.ique.get_nowait()
+                qd = self.ique.get_if()
                 if qd:
                     if qd['type'] == 'poison': break_loop = True
                     if qd['type'] == 'tasks': tasks += qd['data']
@@ -90,14 +90,14 @@ class OMPRunnerNB:
                 # try to flush the que
                 if not self.ique.empty() or self.ique.qsize():
                     if self.verb>1: print(f'ique is empty - {self.ique.empty()}, it has {self.ique.qsize()} objects, trying to flush in the 2nd loop')
-                    qd = self.ique.get_nowait()
+                    qd = self.ique.get_if()
                     while qd:
                         if qd:
                             if qd['type'] == 'poison':
                                 break_loop = True
                                 break
                             if qd['type'] == 'tasks': tasks += qd['data']
-                        qd = self.ique.get_nowait()
+                        qd = self.ique.get_if()
 
                 if break_loop:
                     self._kill_allRW() # RW have to be killed here, from the loop, we want to kill them because it is quicker than to wait for them till finish tasks - we do not need their results here
@@ -131,7 +131,7 @@ class OMPRunnerNB:
                 msg = self.que_RW.get() # at least one
                 while msg:
                     rww_msgL.append(msg)
-                    msg = self.que_RW.get_nowait()
+                    msg = self.que_RW.get_if()
                 #while not self.que_RW.empty(): rww_msgL.append(self.que_RW.get()) # --- other way, tested but above looks better
                 if self.verb>2: print(f' >>> received {len(rww_msgL)} messages from RWWraps')
 
@@ -187,7 +187,7 @@ class OMPRunnerNB:
                         est = tasks_left / speed
                         progress = total_n_tasks / (total_n_tasks+tasks_left)
                         print(f' > ({progress * 100:4.1f}% {time.strftime("%H:%M:%S")}) speed: {speed_str}, EST:{est:.1f}min')
-                    else: print(f' > processing speed unknown yet ..')
+                    else: print(f' > processing speed unknown yet..')
                     iv_time = time.time()
                     iv_n_tasks = 0
                     if self.verb>1: print(self._get_RW_info())
@@ -205,7 +205,7 @@ class OMPRunnerNB:
                 while self.alive:
                     # flush the oque
                     while True:
-                        res = self.oque.get_nowait()
+                        res = self.oque.get_if()
                         if res is None: break
                     self.join(timeout=0.0001)
 
@@ -264,7 +264,7 @@ class OMPRunnerNB:
             return None
         else:
             if block:   result = self._results_que.get()
-            else:       result = self._results_que.get_nowait()
+            else:       result = self._results_que.get_if()
             if result: self._n_results_returned += 1
             return result
 

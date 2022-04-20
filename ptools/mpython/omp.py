@@ -28,7 +28,6 @@ import psutil
 import time
 from typing import Any, List, Dict, Optional, Tuple
 
-from ptools.lipytools.decorators import timing
 from ptools.mpython.mptools import sys_res_nfo, MultiprocParam, DevicesParam, QMessage, ExSubprocess, Que
 from ptools.neuralmess.dev_manager import tf_devices
 
@@ -164,12 +163,12 @@ class OMPRunner:
     def _kill_RW(self, id:int):
         self.rwwD[id]['rww'].kill()
         while True: # we have to flush the RW ique
-            ind = self.rwwD[id]['rww'].ique.get_nowait()
+            ind = self.rwwD[id]['rww'].ique.get_if()
             #if ind: print(f'@@@ got ind of RW {id}: {ind}')
             if not ind: break
         self.rwwD[id]['rww'].join()
         self.rwwD[id]['rww'] = None
-        if self.verb>1: print(f' >> killed and joined RWWrap id: {id} ..')
+        if self.verb>1: print(f' >> killed and joined RWWrap id: {id}..')
 
     def _kill_allRW(self):
         for id in self.rwwD:
@@ -238,7 +237,7 @@ class OMPRunner:
             msg = self.que_RW.get() # at least one
             while msg:
                 rww_msgL.append(msg)
-                msg = self.que_RW.get_nowait()
+                msg = self.que_RW.get_if()
             if self.verb>2: print(f' >>> received {len(rww_msgL)} messages from RWWraps')
 
             for msg in rww_msgL:
@@ -286,7 +285,7 @@ class OMPRunner:
                     est = (num_tasks - total_n_tasks) / speed
                     progress = total_n_tasks / num_tasks
                     print(f' > ({progress * 100:4.1f}% {time.strftime("%H:%M:%S")}) speed: {speed_str}, EST:{est:.1f}min')
-                else: print(f' > processing speed unknown yet ..')
+                else: print(f' > processing speed unknown yet..')
                 iv_time = time.time()
                 iv_n_tasks = 0
                 if self.verb>1: print(self._get_RW_info())
@@ -320,132 +319,6 @@ class OMPRunner:
     def exit(self) -> None:
         self._kill_allRW()
         while True: # flush the que_RW
-            res = self.que_RW.get_nowait()
+            res = self.que_RW.get_if()
             #if res: print(f'@@@ got res from self.que_RW: {res}')
             if not res: break
-
-
-# basic OMPRunner example
-@timing
-def example_basic_OMPRunner(
-        multiproc: MultiprocParam=  10,
-        n_tasks: int=               50,
-        max_sec: int=               5):
-
-    import random
-
-    # basic RunningWorker
-    class BRW(RunningWorker):
-        def process(self,
-                    id: int,
-                    sec: int) -> object:
-            time.sleep(sec)
-            return f'{id}_{sec}'
-
-    ompr = OMPRunner(
-        rw_class=       BRW,
-        multiproc=      multiproc,
-        verb=           1)
-    tasks = [{'id': id, 'sec': random.randrange(1, max_sec)} for id in range(n_tasks)]
-    results = ompr.process(tasks)
-
-    print(f'({len(results)}) {results}')
-
-# OMPRunner example with process lifetime and exceptions
-@timing
-def example_more_OMPRunner(
-        multiproc: MultiprocParam=  10,
-        n_tasks: int=               100,
-        max_sec: int=               5,
-        process_lifetime=           2,
-        exception_prob=             0.1):
-
-    import random
-    import time
-
-    # basic RunningWorker
-    class BRW(RunningWorker):
-        def process(self,
-                    id: int,
-                    sec: int) -> object:
-            if random.random() < exception_prob: raise Exception('randomly crashed')
-            time.sleep(sec)
-            return f'{id}_{sec}'
-
-    ompr = OMPRunner(
-        rw_class=       BRW,
-        rw_lifetime=    process_lifetime,
-        multiproc=      multiproc,
-        verb=           1)
-
-    tasks = [{'id': id, 'sec': random.randrange(1, max_sec)} for id in range(n_tasks)]
-    results = ompr.process(tasks, exit=False)
-    print(f'({len(results)}) {results}')
-
-    tasks = [{'id': id, 'sec': random.randrange(1, max_sec)} for id in range(30)] # additional 30 tasks
-    results = ompr.process(tasks, exit=False)
-    print(f'({len(results)}) {results}')
-
-    ompr.exit()
-
-# example with memory
-@timing
-def example_memory_OMPRunner(
-        multiproc: MultiprocParam=  'auto',
-        data_size: int=             1000,
-        n_tasks: int=               1000):
-
-    import numpy as np
-
-    class TMP(RunningWorker):
-        def process(self, ds):
-            revds = []
-            for d in reversed(ds):
-                revds.append(d)
-            return revds
-
-    ompr = OMPRunner(
-        rw_class=           TMP,
-        multiproc=          multiproc,
-        verb=               2)
-
-    some_data = [np.random.random(data_size) for _ in range(data_size)] # list of arrays of random floats
-    tasks = [{'ds': list(reversed(some_data))} for _ in range(n_tasks)] # tasks with data
-    results = ompr.process(tasks)
-    print(len(results))
-
-# example with spaCy model
-def example_spacy_OMPRunner(multiproc: MultiprocParam=4):
-
-    import spacy
-
-    # spaCy model based RunningWorker
-    class SPP(RunningWorker):
-
-        def __init__(self, spacy_model_name: str):
-            RunningWorker.__init__(self)
-            print('loading model ..')
-            self.model = spacy.load(spacy_model_name)
-            print('model loaded!')
-
-        def process(self, text: str) -> Any:
-            doc = self.model(text)
-            se = [(w.text, w.lemma_, w.tag_, w.pos_, w.dep_.lower()) for w in doc]
-            return se
-
-    tasks = [{'text': tx} for tx in ['To jest testowy text do sparsowania: Piła łańcuchowa posiada hamulec bezpieczeństwa i nowy system beznarzędziowej obsługi zespołu tnącego oraz automatyczny system smarowania prowadnicy i łańcucha. Ergonomiczna konstrukcja i niewielka waga ułatwiają pracę tą piłą. Świetna pilarka do prac profesjonalnych oraz do pracy w sadzie, ogrodzie czy na działce. To jest testowe zdanie do sparsowania. Piła łańcuchowa posiada hamulec bezpieczeństwa i nowy system beznarzędziowej obsługi zespołu tnącego oraz automatyczny system smarowania prowadnicy i łańcucha. Ergonomiczna konstrukcja i niewielka waga ułatwiają pracę tą piłą. Świetna pilarka do prac profesjonalnych oraz do pracy w sadzie, ogrodzie czy na działce. To jest testowe zdanie do sparsowania. Piła łańcuchowa posiada hamulec bezpieczeństwa i nowy system beznarzędziowej obsługi zespołu tnącego oraz automatyczny system smarowania prowadnicy i łańcucha. Ergonomiczna konstrukcja i niewielka waga ułatwiają pracę tą piłą. Świetna pilarka do prac profesjonalnych oraz do pracy w sadzie, ogrodzie czy na działce. To jest testowe zdanie do sparsowania. Piła łańcuchowa posiada hamulec bezpieczeństwa i nowy system beznarzędziowej obsługi zespołu tnącego oraz automatyczny system smarowania prowadnicy i łańcucha. Ergonomiczna konstrukcja i niewielka waga ułatwiają pracę tą piłą. Świetna pilarka do prac profesjonalnych oraz do pracy w sadzie, ogrodzie czy na działce.'] * 1000]
-
-    ompr = OMPRunner(
-        rw_class=       SPP,
-        rw_init_kwargs= {'spacy_model_name': 'pl_core_news_sm'},
-        multiproc=      multiproc,
-        verb=           1)
-    processed = ompr.process(tasks=tasks)
-    print(processed)
-
-
-if __name__ == '__main__':
-    #example_basic_OMPRunner()
-    example_more_OMPRunner()
-    #example_memory_OMPRunner()
-    #example_spacy_OMPRunner()

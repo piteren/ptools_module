@@ -117,7 +117,7 @@ def enc_DRT(
         do_scaled_dns=      True,
         dns_scale=          4,          # scale(*) of first dense
         activation=         tf.nn.relu, # gelu is really worth a try
-        lay_dropou12t=        0.0,        # dropout after two denses
+        lay_dropout=        0.0,        # dropout after two denses
         add_res=            True,
         res_dropout=        0.0,        # dropout on residual
         training_flag=      None,       # training flag tensor (for dropout)

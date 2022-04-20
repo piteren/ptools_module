@@ -3,12 +3,12 @@
  2018 (c) piteren
 
  MultiSaver for NN models
- - saves and loads dictionaries of variables lists (with subfolders)
+ - implements support for many savers
+ - stores (saves and loads) variables in subfolders named with keys of 'vars' dict (default 'ALL')
  - supports list of savers (names for different savers for same variable list)
 
 """
-
-import os
+from typing import Dict, List, Optional, Tuple
 from tensorflow.python.tools.inspect_checkpoint import print_tensors_in_checkpoint_file
 
 from ptools.lipytools.little_methods import prep_folder
@@ -20,21 +20,24 @@ class MultiSaver:
     def __init__(
             self,
             model_name :str,
-            vars: list or dict,             # variables may be given in list or dict {key: list} where key is name for the list
-            save_TFD :str,                  # save topfolder
-            savers: tuple=      (None,),    # list of savers names
-            max_keep: list=     None,       # None keeps one
-            session=            None,
-            verb=               0):
+            vars: List or Dict[str,List],               # variables may be given in list or dict {key: list} where key is name for the list
+            save_TFD :str,                              # save topfolder
+            savers: Tuple or List=          (None,),    # tuple of savers names managed by MultiSaver
+            max_keep: Optional[List[int]]=  None,       # for each saver keeps N last ckpt saves, for None: 1 for each saver
+            session=                        None,
+            verb=                           0):
 
         self.save_FD = f'{save_TFD}/{model_name}'
         self.verb = verb
         self.model_name = model_name
+
+        if type(vars) is list: vars = {'ALL': vars}
         self.vars = vars
+
         self.session = session
 
-        if type(self.vars) is list: self.vars = {'ALL': self.vars}
-        if not max_keep: max_keep = [1 for _ in savers]
+        if max_keep is None: max_keep = [1 for _ in savers]
+        assert len(max_keep) == len(savers)
 
         self.savers = {}
         for ix in range(len(savers)):

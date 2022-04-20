@@ -44,9 +44,11 @@ class Que:
     def get(self, **kwargs) -> QMessage:
         return self.q.get(**kwargs)
 
-    def get_nowait(self) -> Optional[QMessage]:
+    def get_if(self) -> Optional[QMessage]:
         try:            return self.q.get_nowait()
         except Empty:   return None
+
+    #INFO: get_nowait replaced by get_if
 
     def empty(self): return self.q.empty()
 
@@ -151,7 +153,7 @@ def exsubprocess_exception_example():
         def subprocess_method(self):
             cnt = 0
             while True:
-                print(f'subprocess_method is running (#{cnt}) ..')
+                print(f'subprocess_method is running (#{cnt})..')
                 cnt += 1
                 if random.random() < 0.1: raise KeyboardInterrupt
                 if random.random() < 0.1: raise Exception
@@ -170,9 +172,9 @@ def exsubprocess_management_example():
         def subprocess_method(self):
             cnt = 0
             while True:
-                msg = self.ique.get_nowait()
+                msg = self.ique.get_if()
                 if msg: print(f'ExS received message: {msg}')
-                print(f'subprocess_method is running (#{cnt}) ..')
+                print(f'subprocess_method is running (#{cnt})..')
                 cnt += 1
                 time.sleep(1)
 

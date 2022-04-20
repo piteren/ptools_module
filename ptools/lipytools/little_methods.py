@@ -6,6 +6,7 @@
 
 """
 
+from collections import OrderedDict
 import csv
 import inspect
 import json
@@ -18,24 +19,9 @@ import time
 from typing import List, Callable, Any, Optional
 
 
-# returns default args (with their values)
-def get_defaults(function: Callable):
-    arg_dict = {}
-    if function:
-        specs = inspect.getfullargspec(function)
-        args = specs.args
-        vals = specs.defaults
-        if vals:
-            vals = list(vals)
-            args.reverse()
-            vals.reverse()
-            for ix in range(len(vals)):
-                arg_dict[args[ix]] = vals[ix]
-    return arg_dict
-
 # prepares function parameters dictionary
 def get_params(function: Callable):
-    params_dict = {'without_defaults':[], 'with_defaults':{}}
+    params_dict = {'without_defaults':[], 'with_defaults':OrderedDict()}
     if function:
         specs = inspect.getfullargspec(function)
         params = specs.args
@@ -83,14 +69,18 @@ def r_pickle( # pickle reader
     if not os.path.isfile(file_path):
         if raise_exception: raise FileNotFoundError(f'file {file_path} not exists!')
         return None
-    obj = pickle.load(open(file_path, 'rb'))
+
+    # obj = pickle.load(open(file_path, 'rb')) << replaced by:
+    with open(file_path, 'rb') as file: obj = pickle.load(file)
+
     if obj_type: assert type(obj) is obj_type, f'ERROR: obj from file is not {str(obj_type)} type !!!'
     return obj
 
 def w_pickle( # pickle writer
         obj,
         file_path):
-    pickle.dump(obj, open(file_path, 'wb'))
+    with open(file_path, 'wb') as file:
+        pickle.dump(obj, file)
 
 def r_json( # json reader
         file_path,
@@ -137,20 +127,21 @@ def r_csv( # csv reader
 
 # returns timestamp string
 def stamp(
-        year=       False,
-        date=       True,
-        letters=    3):
+        year=                   False,
+        date=                   True,
+        letters: Optional[int]= 3):
     random.seed(time.time())
-    if year:        stp = time.strftime('%y%m%d.%H%M')
-    else:           stp = time.strftime('%m%d.%H%M')
-    if not date:    stp = ''
+    if date:
+        if year: stp = time.strftime('%y%m%d_%H%M')
+        else:    stp = time.strftime('%m%d_%H%M')
+    else:        stp = ''
     if letters:
-        if date:    stp += '.'
-        if True:    stp += ''.join([random.choice(string.ascii_letters) for _ in range(letters)])
+        if date: stp += '_'
+        stp += ''.join([random.choice(string.ascii_letters) for _ in range(letters)])
     return stp
 
-# returns string representation of given list
-def list_str(ls: List[Any], limit: Optional[int]=200):
+# returns nice string of given list
+def list_str(ls: List[Any], limit:Optional[int]=200):
     lstr = [str(e) for e in ls]
     lstr = '; '.join(lstr)
     if limit: lstr = lstr[:limit]
@@ -176,7 +167,7 @@ def print_nested_dict(dc: dict, ind_scale=2, line_limit=200):
             if tp!='D':
                 exmpl = str(root[k])
                 if line_limit:
-                    if len(exmpl)>line_limit: exmpl = f'{exmpl[:line_limit]} ..'
+                    if len(exmpl)>line_limit: exmpl = f'{exmpl[:line_limit]}..'
                 exmpl = f' : {exmpl}'
 
             print(f'{spacer}{k} [{tp}.{ln}]{exmpl}')
@@ -185,10 +176,9 @@ def print_nested_dict(dc: dict, ind_scale=2, line_limit=200):
 
     __prn_root(dc,ind=0,ind_scale=ind_scale)
 
-
 # prepares folder, creates or flushes
 def prep_folder(
-        folder_path :str, # folder path
+        folder_path :str,           # folder path
         flush_non_empty=    False):
     if flush_non_empty and os.path.isdir(folder_path): shutil.rmtree(folder_path)
     os.makedirs(folder_path, exist_ok=True)
@@ -197,24 +187,18 @@ def prep_folder(
 def prob(p: float) -> bool:
     return random.random() < p
 
-def test_stamp():
-    print(stamp())
-
-
-def test_print_nested_dict():
-    dc = {
-        'a0': {
-            'a1': {
-                'a2': ['el1','el2']
-            }
-        },
-        'b0': ['el1','el2','el3']
-    }
-    print_nested_dict(dc)
-
-
-
-if __name__ == '__main__':
-
-    #test_stamp()
-    test_print_nested_dict()
+# terminal progress bar
+def progress_ (
+        iteration: float or int,    # current iteration
+        total: float or int,        # total iterations
+        prefix: str=    '',         # prefix string
+        suffix: str=    '',         # suffix string
+        length: int=    20,
+        fill: str=      '█',
+        print_end: str= ''):
+    prog = iteration / total
+    if prog > 1: prog = 1
+    filled_length = int(length * prog)
+    bar = fill * filled_length + '-' * (length - filled_length)
+    print(f'\r{prefix} |{bar}| {prog*100:.1f}% {suffix}', end = print_end)
+    if prog == 1: print()

@@ -16,13 +16,27 @@ from ptools.neuralmess.get_tf import tf
 
 
 # masks GPUs from given list of ids or single one
-def mask_cuda(ids :list or int= None):
+def mask_cuda(ids :Optional[List[int] or int]=  None):
     if ids is None: ids = []
     if type(ids) is int: ids = [ids]
     mask = ''
     for id in ids: mask += f'{int(id)},'
     if len(mask) > 1: mask = mask[:-1]
     os.environ["CUDA_VISIBLE_DEVICES"] = mask
+
+# wraps mask_cuda to hold DevicesParam
+def mask_cuda_devices(devices :DevicesParam=-1, verb=0):
+
+    devices = tf_devices(devices, verb=verb)
+
+    ids = []
+    devices_other = []
+    devices_gpu = []
+    for device in devices:
+        if 'GPU' in device: devices_gpu.append(device)
+        else: devices_other.append(device)
+    if devices_gpu: ids = [dev[12:] for dev in devices_gpu]
+    mask_cuda(ids)
 
 # returns cuda memory size (system first device)
 def get_cuda_mem():

@@ -36,20 +36,19 @@
 
 
 import os
-import random
 import sys, select
 import time
 from typing import Callable, Optional, List, Any
 
-from ptools.lipytools.decorators import timing
 from ptools.lipytools.little_methods import stamp, prep_folder, get_params
 from ptools.lipytools.plots import TBPoltter
 from ptools.lipytools.logger import set_logger
 from ptools.lipytools.stats import msmx
-from ptools.lipytools.config_manager import ConfigManager
+from ptools.pms.config_manager import ConfigManager
 from ptools.mpython.mptools import DevicesParam
 from ptools.pms.hpmser.search_results import SRL
-from ptools.pms.paspa import PaSpa, PSDD
+from ptools.pms.paspa import PaSpa
+from ptools.pms.base_types import PSDD, POINT, point_str
 from ptools.pms.hpmser.helpers import _str_weights
 from ptools.neuralmess.dev_manager import tf_devices
 from ptools.mpython.omp_nb import OMPRunnerNB, RunningWorker
@@ -75,7 +74,7 @@ SAMPLING_CONFIG_UPD = {
 def hpmser(
         func: Callable,                                 # function which parameters need to be optimized
         func_psdd: PSDD,                                # func PSDD, from here points {param: arg} will be sampled
-        func_const: Optional[dict]=     None,           # func constant kwargs {param: arg}, will be updated with sample taken from psdd
+        func_const: Optional[POINT]=    None,           # func constant kwargs, will be updated with sample taken from PaSpa
         devices: DevicesParam=          None,           # devices to use for search
         name: Optional[str]=            None,           # hpmser run name, for None stamp will be used
         add_stamp=                      True,           # adds short stamp to name, when name given
@@ -85,10 +84,11 @@ def hpmser(
         config_upd: Optional[int]=      1000,           # update config after n loops
         n_loops: Optional[int]=         None,           # limit for number of search loops
         hpmser_FD: str=                 '_hpmser_runs', # save folder
+        do_log=                         True,           # sets logger
         do_TB=                          True,           # plots with TB
         pref_axes: Optional[List[str]]= None,           # preferred axes for plot, put here a list of up to 3 params names ['param1',..]
         top_show_freq=                  20,             # how often top results summary will be printed
-        raise_exceptions=               True,           # force to raise + print subprocesses exceptions, independent from verbosity (raising subprocess exceptions does not break hpmser)
+        raise_exceptions=               True,           # forces subprocesses to raise + print exceptions, independent from verbosity (raising subprocess exception does not break hpmser process)
         verb=                           1) -> SRL:
 
     # hpmser RunningWorker (process run by OMP in hpmser)
@@ -97,7 +97,7 @@ def hpmser(
         def __init__(
                 self,
                 func: Callable,
-                func_const: Optional[dict],
+                func_const: Optional[POINT],
                 devices: DevicesParam):
 
             self.func = func
@@ -115,7 +115,7 @@ def hpmser(
         # processes given spoint, passes **kwargs
         def process(
                 self,
-                spoint: dict,
+                spoint: POINT,
                 **kwargs) -> Any:
 
             spoint_with_defaults = {}
@@ -123,8 +123,8 @@ def hpmser(
             spoint_with_defaults.update(spoint)
 
             res = self.func(**spoint_with_defaults)
-            if type(res) is dict:   score = res['score']
-            else:                   score = res
+            if type(res) is dict: score = res['score']
+            else:                 score = res
 
             msg = {'spoint':spoint, 'score':score}
             msg.update(kwargs)
@@ -148,11 +148,12 @@ def hpmser(
             srl.load(f'{hpmser_FD}/{name}')
             assert PaSpa(psdd=func_psdd, distance_L2=distance_L2) == srl.paspa, 'ERR: parameters space differs - cannot continue!'
 
-    set_logger(log_folder=f'{hpmser_FD}/{name}', custom_name=name, add_stamp=False, verb=verb)  # set logger
+    if do_log: set_logger(log_folder=f'{hpmser_FD}/{name}', custom_name=name, add_stamp=False, verb=verb)  # set logger
 
+    prep_folder(f'{hpmser_FD}/{name}') # needs to be created for ConfigManager
     config_manager = ConfigManager(
-        config=         SAMPLING_CONFIG_INITIAL,
         file=           f'{hpmser_FD}/{name}/hpmser.conf',
+        config=         SAMPLING_CONFIG_INITIAL,
         try_to_load=    True)
     sampling_config = config_manager.get_config() # update in case of read from existing file
 
@@ -162,7 +163,13 @@ def hpmser(
         print(f'\n*** hpmser *** {name} started for: {func.__name__}, sampling config: {sampling_config}')
         if srl: print(f' search will continue with {len(srl)} results...')
 
-    if not srl: srl = SRL(paspa=PaSpa(psdd=func_psdd, distance_L2=distance_L2, verb=verb - 1), name=name, verb=verb)
+    if not srl: srl = SRL(
+        paspa=  PaSpa(
+            psdd=           func_psdd,
+            distance_L2=    distance_L2,
+            verb=           verb-1),
+        name=   name,
+        verb=   verb)
     srl.plot_axes = pref_axes
 
     if verb>0: print(f'\n{srl.paspa}')
@@ -217,8 +224,8 @@ def hpmser(
 
                 # fill stochastic points after 50 samples
                 if sample_num == 50:
-                    _sp = srl.get_top_SR().point                    # try with top
-                    if _sp is None: _sp = srl.paspa.sample_point()  # else take random
+                    _sp = srl.get_top_SR().point                        # try with top
+                    if _sp is None: _sp = srl.paspa.sample_point_GX()   # else take random
                     for ix in range(stochastic_est):
                         stochastic_points[sample_num+ix] = _sp
 
@@ -272,6 +279,7 @@ def hpmser(
                 if verb>1: print(f' >> got result #{msg_sample_num}')
 
                 avg_dst = srl.get_avg_dst()
+                mom_dst = srl.get_mom_dst()
                 srl.save(folder=f'{hpmser_FD}/{name}')
 
                 top_SR = srl.get_top_SR()
@@ -292,14 +300,15 @@ def hpmser(
                     time_passed = int(time.time() - msg_s_time)
 
                     srp =  f'{sr.id} {sr.smooth_score:.4f} [{sr.score:.4f} {difs}] {top_SR.id}:{dist_to_max:.3f}'
-                    srp += f'  avg_dst:{avg_dst:.3f}  {time_passed}s'
+                    srp += f'  avg/m:{avg_dst:.3f}/{mom_dst:.3f}  {time_passed}s'
                     if new_sampling_config: srp += f'  new sampling config: {sampling_config}'
                     print(srp)
 
                     # new MAX report
                     if gots_new_max:
 
-                        msr = f'_newMAX: {top_SR.id} {top_SR.smooth_score:.4f} [{top_SR.score:.4f}] {srl.paspa.point_2str(top_SR.point)}\n'
+                        msr = f'_newMAX: {top_SR.id} {top_SR.smooth_score:.4f} [{top_SR.score:.4f}] {point_str(top_SR.point)}\n'
+                        # OLD VERSION: msr = f'_newMAX: {top_SR.id} {top_SR.smooth_score:.4f} [{top_SR.score:.4f}] {srl.paspa.point_2str(top_SR.get_point)}\n'
 
                         prev_sr = srl.get_SR(prev_max_sr_id)
                         dp = srl.paspa.distance(prev_sr.point, top_SR.point) if prev_sr else 0
@@ -336,7 +345,7 @@ def hpmser(
                     break
 
     except KeyboardInterrupt:
-        if verb>0: print(' > hpmser_GX KeyboardInterrupt-ed ..')
+        if verb>0: print(' > hpmser_GX KeyboardInterrupt-ed..')
         raise KeyboardInterrupt # raise exception for OMPRunner
 
     except Exception as e:
@@ -354,45 +363,3 @@ def hpmser(
         if verb>0: print(f'\n{results_str}')
 
         return srl
-
-# hpmser example
-def example_hpmser(
-        n_proc=         3,
-        av_time=        3,      # avg num of seconds for calculation
-        exception_prob= 0.3,
-        verb=           1):
-
-    import time, math
-
-    def some_func(
-            name :str,
-            device :DevicesParam,
-            a :int,
-            b :float,
-            c :float,
-            d :float,
-            wait=   0.1,
-            verb=   0):
-        if random.random() < exception_prob: raise Exception('RandomException')
-        val = math.sin(b-a*c) - abs(a+3.1)/(d+0.5) - pow(b/2,2)/12
-        time.sleep(random.random()*wait)
-        if verb>0 :print(f'... {name} calculated on {device} ({a}) ({b}) >> ({val})')
-        return val
-
-    psdd = {
-        'a':    [-5,5],
-        'b':    [-5.0,5.0],
-        'c':    [-2.0,2],
-        'd':    [0.0,5]}
-
-    hpmser(
-        func=               some_func,
-        func_psdd=          psdd,
-        func_const=         {'name':'pio', 'wait':av_time*2, 'verb':verb-1},
-        devices=            [None]*n_proc,
-        raise_exceptions=   False,
-        verb=               verb)
-
-
-if __name__ == '__main__':
-    example_hpmser()

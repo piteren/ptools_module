@@ -6,15 +6,20 @@
 
 """
 
+from functools import wraps
 from inspect import getfullargspec
 import time
+
+from ptools.lipytools.little_methods import get_params, stamp
 
 # decorator printing execution time report
 def timing(f):
     def new_f(*args, **kwargs):
         stime = time.time()
         ret = f(*args, **kwargs)
-        print(f'(@timing) {f.__name__} finished, taken {time.time() - stime:.1f}sec')
+        taken_sec = time.time() - stime
+        taken = f'{taken_sec/60:.1f}min' if taken_sec > 100 else f'{taken_sec:.1f}sec'
+        print(f'(@timing:{stamp(letters=None)}, taken {taken}) {f.__name__} finished')
         return ret
     new_f.__name__ = f'{f.__name__}:@timing'
     return new_f
@@ -97,6 +102,33 @@ def args(f):
         return f(*args, **kwargs)
     new_f.__name__ = f'{f.__name__}:@args'
     return new_f
+
+# decorator for __init__(), automatically assigns __init__ args and kwargs to the object (self)
+def autoinit(func):
+
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+
+        params = get_params(func)
+        names = params['without_defaults'][1:]  # ..trim self
+        defaults = params['with_defaults']
+
+        for name, arg in list(zip(names, args)) + list(kwargs.items()):
+            setattr(self, name, arg)
+
+        # case, when default is given with args
+        left_args = args[len(names):]
+        for la,key in zip(left_args,defaults.keys()):
+            defaults[key] = la
+
+        for name in defaults:
+            val = defaults[name]
+            if not hasattr(self, name):
+                setattr(self, name, val)
+
+        func(self, *args, **kwargs)
+
+    return wrapper
 
 
 def example_args():

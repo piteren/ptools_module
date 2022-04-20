@@ -7,10 +7,11 @@
 """
 
 import numpy as np
-import os
+from typing import Optional
 
 from ptools.neuralmess.get_tf import tf
-from ptools.lipytools.little_methods import short_scin, prep_folder
+from ptools.neuralmess.dev_manager import DevicesParam, mask_cuda_devices, tf_devices
+from ptools.lipytools.little_methods import short_scin
 from ptools.mpython.mpdecor import proc_wait
 
 
@@ -77,24 +78,24 @@ def grad_clipper_AVT(
         verb=           0):
 
     gg_norm = tf.global_norm(gradients) # gradients global norm
-    avt_gg_norm = tf.get_variable( # time averaged gradients global norm variable
-        name=           'avt_gg_norm',
+    gg_avt_norm = tf.get_variable( # time averaged gradients global norm variable
+        name=           'gg_avt_norm',
         shape=          [],
         trainable=      False,
         initializer=    tf.constant_initializer(avt_SVal),
         dtype=          tf.float32)
 
-    avt_update = tf.reduce_min([gg_norm, avt_max_upd * avt_gg_norm]) # single value to update AVTG with (current GNorm or clipped to max value)
+    avt_update = tf.reduce_min([gg_norm, avt_max_upd * gg_avt_norm]) # single value to update AVTG with (current GNorm or clipped to max value)
     # assign new value
-    avt_gg_norm = tf.assign(
-        ref=    avt_gg_norm,
-        value=  (avt_gg_norm * (avt_window-1) + avt_update) / avt_window)
+    gg_avt_norm = tf.assign(
+        ref=    gg_avt_norm,
+        value=  (gg_avt_norm * (avt_window-1) + avt_update) / avt_window)
     if verb > 0: print(f'grad_clipper_AVT: avt_SVal {avt_SVal:.1f}, avt_window {avt_window}, avt_max_upd {avt_max_upd:.1f}')
 
     if do_clip:
         gradients, _ = tf.clip_by_global_norm(
             t_list=     gradients,
-            clip_norm=  clip_value if clip_value else avt_gg_norm,
+            clip_norm=  clip_value if clip_value else gg_avt_norm,
             use_norm=   gg_norm)
         if verb > 0: print(f' >> is clipping gradients {"with value" if clip_value else "with AVT"}')
     elif verb > 0: print(' >> not doing clipping')
@@ -102,21 +103,21 @@ def grad_clipper_AVT(
     return {
         'gradients':    gradients,
         'gg_norm':      gg_norm,
-        'avt_gg_norm':  avt_gg_norm}
+        'gg_avt_norm':  gg_avt_norm}
 
 # gradient clipping loss reductor (gradient clipping + optimizer) (wraps grad_clipper_AVT)
 def gc_loss_reductor(
         optimizer :tf.compat.v1.train.Optimizer,
-        vars :list=     None,
-        g_step=         None,       # put here globalStep variable to update +1 with optimizer
-        avg_loss=       None,       # put here loss if you do not have gradients yet
-        gradients=      None,
-        clip_value=     None,
-        avt_SVal=       0.1,
-        avt_window=     100,
-        avt_max_upd=    1.5,
-        do_clip=        True,
-        verb=           0):
+        vars :list=         None,
+        g_step=             None,   # put here globalStep variable to update +1 with optimizer
+        avg_loss=           None,   # put here loss if you do not have gradients yet
+        gradients=          None,
+        clip_value=         None,
+        avt_SVal: float=    0.1,
+        avt_window: int=    100,
+        avt_max_upd: float= 1.5,
+        do_clip: bool=      True,
+        verb=               0):
 
     if vars is None: vars = tf.trainable_variables()
 
@@ -139,7 +140,7 @@ def gc_loss_reductor(
     return {
         'optimizer':    optimizer,
         'gg_norm':      gc_out['gg_norm'],
-        'avt_gg_norm':  gc_out['avt_gg_norm']}
+        'gg_avt_norm':  gc_out['gg_avt_norm']}
 
 # replaces nan values @tensor with zero
 def replace_nan_with_zero(tensor): return tf.where(tf.is_nan(tensor), tf.zeros_like(tensor), tensor)
@@ -195,7 +196,7 @@ def log_vars(
         sort=       True): # use order from list or sorted by name
 
     print(f'Total num of variables: {len(variables)}')
-    print(f' > num of floats: {short_scin(num_var_floats(variables), precise=True)}')
+    print(f' > num of floats: {short_scin(num_var_floats(variables), precision=2)}')
     if not simple:
         vns = [(v.name, v.shape) for v in variables]
         if sort:
@@ -223,19 +224,22 @@ def log_checkpoint(ckpt_FD):
         var = tf.train.load_variable(ckpt_FD, var_name)
         print(f' > ({100*sh_size(shape)/tot_siz:4.1f}%) {var_name:{max_nm_len}s} {str(shape):{max_sh_len}s} {var.dtype}')
 
-# weighted merge of two checkpoints, does NOT check for compatibility of two checkpoints, but will crash if not
+# weighted merge of two checkpoints, does NOT check for compatibility of two checkpoints, but will crash if those are not compatible
 @proc_wait
 def mrg_ckpts(
-        ckptA: str,                 # checkpoint A (folder name)
-        ckptA_FD: str,              # root folder of cpktA (absolute or relative)
-        ckptB: str or None,         # checkpoint B (folder name), for None takes 100% ckptA
-        ckptB_FD: str or None,      # root folder of cpktB (absolute or relative)
-        ckptM: str,                 # checkpoint merged (folder name)
-        ckptM_FD: str,              # root folder of cpktM (absolute or relative)
-        mrgF: float=        0.5,    # merge factor (weight)
-        noiseF: float=      0.0,    # noise factor, amount of noise added to new value (0.0-1.0...)
-        replace_scope: str= None,   # replaces outer scope with given string
-        verb=               0):
+        ckptA: str,                     # checkpoint A (folder name)
+        ckptA_FD: str,                  # root folder of cpktA (absolute or relative)
+        ckptB: str or None,             # checkpoint B (folder name), for None takes 100% ckptA
+        ckptB_FD: str or None,          # root folder of cpktB (absolute or relative)
+        ckptM: str,                     # checkpoint merged (folder name)
+        ckptM_FD: str,                  # root folder of cpktM (absolute or relative)
+        ratio: float=           0.5,    # ratio of merge
+        noise: float=           0.0,    # noise factor, amount of noise added to new value (0.0-1.0...)
+        replace_scope: str=     None,   # replaces outer scope with given string
+        devices :DevicesParam=  None,   # by default does merge on CPU
+        verb=                   0):
+
+    mask_cuda_devices(devices)
 
     if ckptA_FD[-1] != '/': ckptA_FD += '/'
     if ckptB_FD and ckptB_FD[-1] != '/': ckptB_FD += '/'
@@ -277,10 +281,10 @@ def mrg_ckpts(
         varA = avL[ix]
         if bvL and varA.dtype == 'float32':
             varB = bvL[ix]
-            noise = tf.random.truncated_normal( # random values from a normal distribution truncated by 2stddev
+            noise_tensor = tf.random.truncated_normal( # random values from normal distribution truncated by 2stddev
                 shape=  varA.shape,
                 stddev= tf.math.reduce_std(varA)) # stddev of varA
-            var = tf.Variable(mrgF*varA + (1-mrgF)*varB + noiseF*noise, name=var_name)
+            var = tf.Variable(ratio * varA + (1 - ratio) * varB + noise * noise_tensor, name=var_name)
         else:
             var = tf.Variable(varA, name=var_name)
         cvL.append(var)
@@ -298,20 +302,49 @@ def mrg_ckpts(
     tf.reset_default_graph()
     if verb>0: print('done!')
 
+# TensorBoard writer
+class TBwr:
+
+    def __init__(
+            self,
+            logdir: str,
+            flush_secs= 10):
+        self.logdir = logdir
+        self.flush_secs = flush_secs
+        # INFO: tf.summary.FileWriter creates logdir while init, because of that self.sw init has moved here (in the first call of add)
+        self.sw = None
+
+    def add(self,
+            value,
+            tag: str,
+            step: int):
+
+        if not self.sw:
+            self.sw = tf.summary.FileWriter(logdir=self.logdir, flush_secs=self.flush_secs)
+
+        sv = tf.Summary(value=[tf.Summary.Value(tag=tag, simple_value=value)])
+        self.sw.add_summary(sv, step)
+
+    def add_summary(self, summ, step):
+        self.sw.add_summary(summ, step)
+
+    def flush(self): self.sw.flush()
+
 # processes zeroes array returned by model in following intervals
 class ZeroesProcessor:
 
     def __init__(
             self,
-            intervals :tuple=   (50,500,5000),
-            tag_pfx=            'nane', # prefix of tag in TB
-            summ_writer :tf.compat.v1.summary.FileWriter=   None):  # if given will put summaries to TB with intervals frequencies
+            intervals :tuple=       (50,500,5000),
+            tag_pfx=                'nane',     # prefix of tag in TB
+            tbwr: Optional[TBwr]=   None,       # if given will put summaries to TB with intervals frequencies
+    ):
 
         self.intervals = intervals
         self.zsL = {k: [] for k in self.intervals}
         self.single = []
-        self.summ_writer = summ_writer
         self.tag_pfx = tag_pfx
+        self.tbwr = tbwr
 
     # takes next zeroes array and processes
     def process(
@@ -330,29 +363,11 @@ class ZeroesProcessor:
                 rd[k] = np.mean(np.where(np.mean(np.stack(self.zsL[k], axis=0), axis=0) == 1, 1, 0))
                 self.zsL[k] = []
 
-        if self.summ_writer and step:
+        if self.tbwr and step:
             for k in rd:
-                nane_summ = tf.Summary(value=[tf.Summary.Value(tag=f'{self.tag_pfx}/nane_{k}', simple_value=rd[k])])
-                self.summ_writer.add_summary(nane_summ, step)
+                self.tbwr.add(
+                    value=  rd[k],
+                    tag=    f'{self.tag_pfx}/nane_{k}',
+                    step=   step)
 
         return rd
-
-# TensorBoard writer
-class TBwr:
-
-    def __init__(
-            self,
-            logdir: str,
-            flush_secs= 10):
-        prep_folder(logdir)
-        self.sw = tf.summary.FileWriter(logdir=logdir, flush_secs=flush_secs)
-
-    def add(self,
-            val,
-            name,
-            step):
-
-        sv = tf.Summary(value=[tf.Summary.Value(tag=name, simple_value=val)])
-        self.sw.add_summary(sv, step)
-
-    def flush(self): self.sw.flush()

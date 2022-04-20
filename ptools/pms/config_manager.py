@@ -1,46 +1,46 @@
 """
     Configuration Manager
-        - keeps configuration {key: value}
+        - keeps configuration POINT {key: value}
         - loads from and saves to file
 """
 from copy import deepcopy
 from typing import Optional
 
 from ptools.lipytools.little_methods import w_json, r_json
+from ptools.pms.base_types import POINT
 
 
 class ConfigManager:
 
     def __init__(
             self,
-            config: Optional[dict], # {param: value}
             file: str,
-            try_to_load=    True):  # tries to load from file if file exists
+            config: Optional[POINT]=    None,   # {param: value}
+            try_to_load=                True):  # tries to load from file if file exists
 
         self.__file = file
-        self.__config = config if config is not None else {}
-        if try_to_load:
-            file_config = r_json(self.__file)
-            if file_config is not None: self.__config = file_config
+        self.__config: POINT = config if config is not None else {}
+        if try_to_load: self.load()
         self.__save_file()
 
     # loads configuration from file and returns it
-    def __read_file(self) -> dict:
+    def __read_file(self) -> POINT:
         return r_json(self.__file)
 
     # saves configuration to jsonl file
     def __save_file(self):
         w_json(self.__config, self.__file)
 
-    def get_config(self) -> dict:
+    # returns (copy of) config
+    def get_config(self) -> POINT:
         return deepcopy(self.__config)
 
     # loads configuration from file, updates self, returns new configuration (from file) or only keys that have changed values
     def load(
             self,
-            return_only_changed=    True) -> dict:
+            return_only_changed=    True) -> POINT:
 
-        file_config = self.__read_file()
+        file_config = self.__read_file() or {}
         config_changed = {}
         for k in file_config:
             if k not in self.__config or self.__config[k] != file_config[k]:
@@ -53,7 +53,7 @@ class ConfigManager:
     def update(
             self,
             return_only_changed=    True,
-            **kwargs) -> dict:
+            **kwargs) -> POINT:
 
         config_changed = {}
         for k in kwargs:

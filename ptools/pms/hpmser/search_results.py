@@ -1,52 +1,56 @@
 import random
 from typing import Sized, List, Tuple, Optional, Iterable
+import warnings
 
 from ptools.lipytools.little_methods import r_pickle, w_pickle
 from ptools.lipytools.plots import three_dim
-from ptools.pms.paspa import POINT, PaSpa
+from ptools.pms.paspa import PaSpa
+from ptools.pms.base_types import POINT, point_str
 from ptools.pms.hpmser.helpers import _str_weights
 
-#TODO:
-# - (?) add __smoothed_and_sorted state to SRL to keep such info - do we need that?
 
-# search results list [SeRes] with some methods
+# Search Results List [SeRes] with some methods
 class SRL(Sized):
 
-    # single search result
+    # single Search Result
     class SeRes:
 
         def __init__(
                 self,
                 point: POINT,
                 score=      None):
-            self.id = None
+            self.id = None              # to be updated, id of SeRes, set by SRL: id = len(SRL)
             self.point = point
             self.score = score
-            self.smooth_score = None # to be updated
+            self.smooth_score = None    # to be updated
 
         def __str__(self): return f'SeRes: id:{self.id}, point:{self.point}, score:{self.score}, smooth_score{self.smooth_score}'
 
     def __init__(
             self,
-            paspa: PaSpa=               None,   # parameters space of this SRL
-            name: str=                  'srl',
-            np_smooth: int=             3,      # default / starting value
+            paspa: Optional[PaSpa]=     None,   # parameters space of this SRL
+            name: str=                  'SRL',
+            np_smooth: int=             3,      # Number of Points taken into account while calculating smooth score - default / starting value
             plot_axes: list=            None,   # list with axes names (max 3), eg: ['drop_a','drop_b','loss']
             verb=                       0):
 
-        self.paspa = paspa
-        self.name = name
-        self.__np_smooth = np_smooth
-        self.plot_axes = plot_axes
         self.verb = verb
-        if self.verb>0: print(f'\n*** SRL {name} initialized')
+        self.name = name
+        if self.verb>0: print(f'\n*** SRL {self.name} initializing')
+
+        self.paspa = paspa
+
+        self.__np_smooth = np_smooth        # current np_smooth of SeRes
+        self.plot_axes = plot_axes
+
 
         self.__srL: List[SRL.SeRes] = []    # sorted periodically by smooth_score
-        self.__sr_distances = []            # sr distances cache (by SeRes id)
-        self.__sr_scores = []               # sr scores cache (by SeRes id)
-        self.__avg_dst = 1
+        self.__smoothed_and_sorted = True   # flag (state) - keeps info about SRL that is smoothed & sorted
+        self.__distances = []               # distances cache (by SeRes id)
+        self.__scores = []                  # scores cache (by SeRes id)
+        self.__avg_dst = 1                  # average distance of SRL for self.__np_smooth
 
-    def __len__(self): return len(self.__srL)
+    # ****************************************************************************************************** load & save
 
     def __get_srl_path(self, save_dir: str) -> str: return f'{save_dir}/{self.name}.srl'
 
@@ -55,7 +59,7 @@ class SRL(Sized):
     # loads (alternatively from backup)
     def load(self, save_dir :str):
 
-        if self.verb > 0: print(f' > SRL {self.name} loading form {save_dir} ..')
+        if self.verb > 0: print(f' > SRL {self.name} loading form {save_dir}..')
 
         try:
             obj = r_pickle(self.__get_srl_path(save_dir))
@@ -68,11 +72,12 @@ class SRL(Sized):
         self.plot_axes =                obj.plot_axes
 
         self.__srL =                    obj.__srL
-        self.__sr_distances =           obj.__sr_distances
-        self.__sr_scores =              obj.__sr_scores
+        self.__smoothed_and_sorted =    obj.__smoothed_and_sorted
+        self.__distances =              obj.__distances
+        self.__scores =                 obj.__scores
         self.__avg_dst =                obj.__avg_dst
 
-        if self.verb > 0: print(f' > SRL loaded {len(self.__srL)} results')
+        if self.verb>0: print(f' > SRL loaded {len(self.__srL)} results')
 
     # saves with backup
     def save(self, folder :str):
@@ -84,8 +89,15 @@ class SRL(Sized):
         w_pickle(self, self.__get_srl_path(folder))
         self.plot(folder=folder)
 
+    # ************************************************************************************************ getters & setters
+
+    # returns top SeRes (max smooth_score)
     def get_top_SR(self) -> SeRes or None:
-        if self.__srL: return self.__srL[0]
+        if self.__srL:
+            if not self.__smoothed_and_sorted:
+                warnings.warn('SRL asked to return top SR while SRL is not smoothed_and_sorted - have to sort!')
+                self.smooth_and_sort()
+            return self.__srL[0]
         return None
 
     def get_SR(self, id: int) -> SeRes or None:
@@ -93,124 +105,19 @@ class SRL(Sized):
             if sr.id == id: return sr
         return None
 
-    # returns n closest SeRes to given point
-    def get_n_closest(
-            self,
-            point: POINT or SeRes,
-            n: Optional[int]=   None) -> List[SeRes]:
-        if not n: n = self.__np_smooth
-        if len(self.__srL) <= n:
-            return [] + self.__srL
-        else:
-            id_dst = \
-                list(zip(range(len(self.__srL)), self.__sr_distances[point.id])) \
-                    if type(point) is SRL.SeRes else \
-                    [(sr.id, self.get_distance(point, sr.point)) for sr in self.__srL]
-            id_dst.sort(key=lambda x: x[1]) # sort by distance to this point
-            return [self.get_SR(id[0]) for id in id_dst[:n]]
-
-    # adds new result, caches distances, smooths & sorts
-    def add_result(self,
-            point: POINT,
-            score: float,
-            force_no_update=    False # aborts calculation of smooth score and sorting
-    ) -> SeRes:
-
-        sr = SRL.SeRes(point,score)
-        sr.id = len(self.__srL)
-
-        # update cached distances
-        sr_dist = []
-        id_point = [(s.id,s.point) for s in self.__srL]
-        id_point.sort(key= lambda x:x[0]) # sort by id
-        for id,point in id_point:
-            d = self.paspa.distance(sr.point,point)
-            sr_dist.append(d)
-            self.__sr_distances[id].append(d)
-        sr_dist.append(0)
-        self.__sr_distances.append(sr_dist)
-
-        self.__sr_scores.append(score) # update cached score
-
-        self.__srL.append(sr) # add SeRes
-
-        if force_no_update: sr.smooth_score = sr.score
-        else: self.smooth_and_sort()
-        return sr
-
-    # sets np_smooth, then smooths and sorts if needed
-    def set_np_smooth(self, np_smooth: int):
-        if np_smooth != self.__np_smooth:
-            self.__np_smooth = np_smooth
-            self.smooth_and_sort()
-
-    # returns distance between two points, if points are SeRes uses cached distance
+    # returns distance between two points, if points are SeRes type uses cached distance
     def get_distance(self,
             pa: POINT or SeRes,
             pb: POINT or SeRes) -> float:
-        if type(pa) is SRL.SeRes and type(pb) is SRL.SeRes: return self.__sr_distances[pa.id][pb.id]
+        if type(pa) is SRL.SeRes and type(pb) is SRL.SeRes: return self.__distances[pa.id][pb.id]
         if type(pa) is SRL.SeRes: pa = pa.point
         if type(pb) is SRL.SeRes: pb = pb.point
         return self.paspa.distance(pa, pb)
 
-    # returns (smooth score, average distance, all scores sorted by distance) for given point or SeRes and optionally np_smooth
-    def smooth_point(self,
-            point: POINT or SeRes,
-            np_smooth: Optional[int]=   None) -> Tuple[float,float,List[float]]:
-
-        # case: no points in srL
-        smooth_score_np = 0     # smooth score for self.__np_smooth
-        avg_dst_np =      1     # average distance for np_smooth
-        all_scores =     [0]    # np scores sorted by distance
-
-        if not np_smooth: np_smooth = self.__np_smooth
-        if self.__srL:
-            score_dst = \
-                list(zip(self.__sr_scores, self.__sr_distances[point.id])) \
-                    if type(point) is SRL.SeRes else \
-                    [(sr.score, self.get_distance(point, sr.point)) for sr in self.__srL]
-            score_dst.sort(key=lambda x: x[1])  # sort by distance to this point
-            score_dst_np = score_dst[:np_smooth + 1] # trim to np_smooth points (+1 point for reference)
-
-            # case of one/two points in score_dst_np
-            if len(score_dst_np) < 3:
-                smooth_score_np = score_dst_np[0][0]  # closest point score
-                all_scores = [score_dst_np[0][0]]
-            else:
-                all_scores, all_dst = zip(*score_dst_np)  # scores, distances
-
-                max_dst = all_dst[-1]  # distance of last(reference) point
-
-                # remove last (reference)
-                all_dst = all_dst[:-1]
-                all_scores = all_scores[:-1]
-
-                # set weights for scores
-                weights = []
-                if max_dst: weights = [(max_dst-d)/max_dst for d in all_dst]  # try with distance based weights <1;0>
-                if sum(weights) == 0: weights = [1] * len(all_dst)  # naive baseline / equal for case: (max_dst == 0) or (max_dst-d == 0)
-
-                wall_scores = [all_scores[ix]*weights[ix] for ix in range(len(all_scores))]
-                smooth_score_np = sum(wall_scores) / sum(weights) # weighted score
-                avg_dst_np = sum(all_dst) / len(all_dst)
-
-        return smooth_score_np, avg_dst_np, all_scores
-
-    # calculates smooth_score for each SeRes from self.__srL, updates self.__avg_dst
-    def __smooth(self):
-        if self.__srL:
-            avg_dst = []
-            for sr in self.__srL:
-                sr.smooth_score, ad, _ = self.smooth_point(sr)
-                avg_dst.append(ad)
-            self.__avg_dst = sum(avg_dst)/len(avg_dst)
-
-    # smooths self.__srL
-    def smooth_and_sort(self):
-        self.__smooth()
-        self.__srL.sort(key=lambda x: x.smooth_score, reverse=True)
-
     def get_avg_dst(self): return self.__avg_dst
+
+    # max of min distances of SRL: max(min_distance)
+    def get_mom_dst(self): return max([min(d[1:]) if d[1:] else 0 for d in self.__distances])
 
     # returns sample with policy and estimated score
     def get_opt_sample(self,
@@ -222,14 +129,16 @@ class SRL(Sized):
     ) -> Tuple[POINT,float]:
 
         prob_rnd = 1 - prob_opt - prob_top
-        if random.random() < prob_rnd or len(self.__srL) < 10: sample = self.paspa.sample_point() # one random point
+        if random.random() < prob_rnd or len(self.__srL) < 10: sample = self.paspa.sample_point_GX() # one random point
         else:
-            if random.random() < prob_opt/(prob_top+prob_opt): points = [self.paspa.sample_point() for _ in range(n_opt+1)] # some random points ...last for reference
+            if random.random() < prob_opt/(prob_top+prob_opt): points = [self.paspa.sample_point_GX() for _ in range(n_opt + 1)] # some random points ...last for reference
             # top points
             else:
                 n_top += 1 # last for reference
                 if n_top > len(self.__srL): n_top = len(self.__srL)
-                points = [self.paspa.sample_point(self.__srL[ix].point, ax_dst=avg_dst) for ix in range(n_top)] # top points
+                points = [self.paspa.sample_point_GX(
+                    point_main=     self.__srL[ix].point,
+                    noise_scale=    avg_dst) for ix in range(n_top)] # top points
 
             scores = [self.smooth_point(p)[0] for p in points]
 
@@ -260,15 +169,15 @@ class SRL(Sized):
     ) -> Tuple[POINT,float]:
 
         if random.random() < 1-prob_opt-prob_top or len(self.__srL) < 10:
-            sample = self.paspa.sample_point() # one random point
+            sample = self.paspa.sample_point_GX() # one random point
         else:
             # choice from better half of random points
             if random.random() < prob_opt/(prob_top+prob_opt):
-                points = [self.paspa.sample_point() for _ in range(2*n_opt)]    # 2*some random points
-                scores = [self.smooth_point(p)[0] for p in points]              # their scores
+                points = [self.paspa.sample_point_GX() for _ in range(2 * n_opt)]   # 2*some random points
+                scores = [self.smooth_point(p)[0] for p in points]                  # their scores
                 all_pw = list(zip(points, scores))
-                all_pw.sort(key=lambda x: x[1], reverse=True)                   # sorted
-                all_pw = all_pw[:len(all_pw)//2]                                # take better half
+                all_pw.sort(key=lambda x: x[1], reverse=True)                       # sorted
+                all_pw = all_pw[:len(all_pw)//2]                                    # take better half
                 maxs = all_pw[0][1]
                 subs = all_pw.pop(-1)[1]
                 mins = all_pw[-1][1]
@@ -286,17 +195,129 @@ class SRL(Sized):
                 mins = min(scores)
                 scores = [s-mins for s in scores]                       # reduced scores
                 sra, srb = random.choices(top_sr, weights=scores, k=2)  # two SR
-                sample = self.paspa.sample_GX_point(
-                    pa=                 sra.point,
-                    pb=                 srb.point,
-                    ax_dst=             avg_dst,
-                    allow_full_tuple=   True)
+                sample = self.paspa.sample_point_GX(
+                    point_main=                 sra.point,
+                    point_scnd=                 srb.point,
+                    noise_scale=                avg_dst)
                 print(f'   % sampled GX from: {sra.smooth_score:.4f} and {srb.smooth_score:.4f}')
         est_score, _, _ =  self.smooth_point(sample)
         return sample, est_score
 
+    # returns n closest SeRes to given point
+    def __get_n_closest(
+            self,
+            point: POINT or SeRes,
+            n: Optional[int]=   None) -> List[SeRes]:
+        if not n: n = self.__np_smooth
+        if len(self.__srL) <= n:
+            return [] + self.__srL
+        else:
+            id_dst = \
+                list(zip(range(len(self.__srL)), self.__distances[point.id])) \
+                    if type(point) is SRL.SeRes else \
+                    [(sr.id, self.get_distance(point, sr.point)) for sr in self.__srL]
+            id_dst.sort(key=lambda x: x[1]) # sort by distance to this point
+            return [self.get_SR(id[0]) for id in id_dst[:n]]
+
+    # sets np_smooth, then smooths and sorts
+    def set_np_smooth(self, np_smooth: int):
+        if np_smooth != self.__np_smooth:
+            self.__np_smooth = np_smooth
+            self.smooth_and_sort()
+
+    # adds new result, caches distances, smooths & sorts
+    def add_result(self,
+            point: POINT,
+            score: float,
+            force_no_update=    False # aborts calculation of smooth score and sorting
+    ) -> SeRes:
+
+        sr = SRL.SeRes(point,score)
+        sr.id = len(self.__srL)
+
+        # update cached distances
+        sr_dist = []
+        id_point = [(s.id,s.point) for s in self.__srL]
+        id_point.sort(key= lambda x:x[0]) # sort by id
+        for id,point in id_point:
+            d = self.paspa.distance(sr.point,point)
+            sr_dist.append(d)
+            self.__distances[id].append(d)
+        sr_dist.append(0)
+
+        self.__distances.append(sr_dist)
+
+        self.__scores.append(score) # update cached score
+
+        self.__srL.append(sr) # add SeRes
+
+        if force_no_update:
+            sr.smooth_score = sr.score
+            self.__smoothed_and_sorted = False
+        else: self.smooth_and_sort()
+
+        return sr
+
+    # returns (smooth_score, average_distance, all scores sorted by distance) for given point or SeRes
+    def smooth_point(self,
+            point: POINT or SeRes,
+            np_smooth: Optional[int]=   None # used if given, otherwise self.__np_smooth
+    ) -> Tuple[float, float, List[float]]:
+
+        # case: no points in srL
+        smooth_score_np = 0     # smooth score for self.__np_smooth
+        avg_dst_np =      1     # average distance for np_smooth
+        all_scores =     [0]    # np scores sorted by distance
+
+        if not np_smooth: np_smooth = self.__np_smooth
+        if self.__srL:
+            score_dst = \
+                list(zip(self.__scores, self.__distances[point.id])) \
+                    if type(point) is SRL.SeRes else \
+                    [(sr.score, self.get_distance(point, sr.point)) for sr in self.__srL]
+            score_dst.sort(key=lambda x: x[1])  # sort by distance to this point
+            score_dst_np = score_dst[:np_smooth + 1] # trim to np_smooth points (+1 point for reference)
+
+            # case of one/two points in score_dst_np
+            if len(score_dst_np) < 3:
+                smooth_score_np = score_dst_np[0][0]  # closest point score
+                all_scores = [score_dst_np[0][0]]
+            else:
+                all_scores, all_dst = zip(*score_dst_np)  # scores, distances
+
+                max_dst = all_dst[-1]  # distance of last(reference) point
+
+                # remove last (reference)
+                all_dst = all_dst[:-1]
+                all_scores = all_scores[:-1]
+
+                # set weights for scores
+                weights = []
+                if max_dst: weights = [(max_dst-d)/max_dst for d in all_dst]  # try with distance based weights <1;0>
+                if sum(weights) == 0: weights = [1] * len(all_dst)  # naive baseline / equal for case: (max_dst == 0) or (max_dst-d == 0)
+
+                wall_scores = [all_scores[ix]*weights[ix] for ix in range(len(all_scores))]
+                smooth_score_np = sum(wall_scores) / sum(weights) # weighted score
+                avg_dst_np = sum(all_dst) / len(all_dst)
+
+        return smooth_score_np, avg_dst_np, all_scores
+
+    # smooths self.__srL and sorts by SeRes.smooth_score
+    def smooth_and_sort(self):
+
+        if self.__srL:
+            avg_dst = []
+            for sr in self.__srL:
+                sr.smooth_score, ad, _ = self.smooth_point(sr)
+                avg_dst.append(ad)
+            self.__avg_dst = sum(avg_dst)/len(avg_dst)
+
+            self.__srL.sort(key=lambda x: x.smooth_score, reverse=True)
+
+        self.__smoothed_and_sorted = True
+
     def print_distances(self):
-        for dl in self.__sr_distances:
+        for dl in self.__distances:
             s = ''
             for d in dl: s += f'{d:.2f} '
             print(s)
@@ -323,20 +344,20 @@ class SRL(Sized):
             for srIX in range(n_top):
                 sr = self.__srL[srIX]
                 ss_np, avg_dst, all_scores = self.smooth_point(sr)
-                re_str += f'{sr.id:4d} {ss_np:.4f} [{sr.score:.4f}] [{max(all_scores):.4f}-{min(all_scores):.4f}] {avg_dst:.3f} {self.paspa.point_2str(sr.point)}\n'
+                re_str += f'{sr.id:4d} {ss_np:.4f} [{sr.score:.4f}] [{max(all_scores):.4f}-{min(all_scores):.4f}] {avg_dst:.3f} {point_str(sr.point)}\n'
 
         self.set_np_smooth(orig_nps)
         top_sr_nps = self.get_top_SR()
-        n_closest = self.get_n_closest(top_sr_nps)
+        n_closest = self.__get_n_closest(top_sr_nps)
         re_str += f'{self.__np_smooth}closest points to TOP in NPS {self.__np_smooth}:\n'
-        for sr in n_closest: re_str += f'{sr.id:4d} [{sr.score:.4f}] {self.paspa.point_2str(sr.point)}\n'
+        for sr in n_closest: re_str += f'{sr.id:4d} [{sr.score:.4f}] {point_str(sr.point)}\n'
 
         if all_nps and len(self.__srL) > n_top:
             self.set_np_smooth(all_nps)
             re_str += f'\nALL results for NPS {all_nps} (avg_dst:{self.__avg_dst:.3f}):\n'
             for sr in self.__srL:
                 ss_np, avg_dst, all_scores = self.smooth_point(sr)
-                re_str += f'{sr.id:4d} {ss_np:.4f} [{sr.score:.4f}] [{max(all_scores):.4f}-{min(all_scores):.4f}] {avg_dst:.3f} {self.paspa.point_2str(sr.point)}\n'
+                re_str += f'{sr.id:4d} {ss_np:.4f} [{sr.score:.4f}] [{max(all_scores):.4f}-{min(all_scores):.4f}] {avg_dst:.3f} {point_str(sr.point)}\n'
 
         self.set_np_smooth(orig_nps)
         return re_str
@@ -372,3 +393,5 @@ class SRL(Sized):
             z_name=     columns[2],
             val_name=   columns[3],
             save_FD=    folder)
+
+    def __len__(self): return len(self.__srL)

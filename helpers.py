@@ -2,8 +2,8 @@ from setuptools import find_packages
 
 # reads requirements from 'ptools/requirements.txt'
 def get_requirements():
-    with open('ptools/requirements.txt', 'r') as file:
-        lines = [file.readline()[:-1] for line in file]
+    with open('ptools/requirements.txt') as file:
+        lines = [l[:-1] for l in file.readlines()]
         return lines
 
 

@@ -11,6 +11,7 @@ setup(
     packages=           find_packages(),
     version=            'v0.9.3',
     install_requires=   get_requirements(),
+    python_requires=    '>=3.7.13',
     license=            'MIT',
     license_files =     ('LICENSE.txt',),
     description=        'python tools (ptools) by piteren')

@@ -51,7 +51,7 @@ class Trainer(ABC):
             actor: Actor,
             exploration=    0.5,    # exploration factor
             batch_size=     32,     # Actor update data size
-            discount=       0.9,  # return discount factor (gamma)
+            discount=       0.9,    # return discount factor (gamma)
             verb=           1):
 
         self.verb = verb
@@ -93,7 +93,7 @@ class Trainer(ABC):
 
     # normalizes x with zscore (0 mean 1 std)
     @staticmethod
-    def zscore_norm(x: List[float]):
+    def zscore_norm(x):
         """
             z-score is (x-mean(x))/stddev(x)
             this is (?) helpful for training, as rewards can vary considerably between episodes,
@@ -200,6 +200,7 @@ class Trainer(ABC):
     def train(
             self,
             num_updates=    2000,   # number of training updates
+            upd_on_episode= False,  # updates on episode finish (do not wait till batch)
             test_freq=      100,    # number of updates between test
             test_episodes=  100,    # number of testing episodes
             test_max_steps= 1000,   # max number of episode steps while testing
@@ -237,6 +238,8 @@ class Trainer(ABC):
                     self.remember(observation=o, action=a, dreturn=d, reward=r, next_observation=n, game_over=t)
 
                 n_terminals += np.sum(np.array(terminals).astype(dtype=np.int))
+
+                if upd_on_episode: break
 
             inspect = (uix % test_freq == 0) if self.verb > 1 else False
             loss_actor = self.update_actor(inspect=inspect)

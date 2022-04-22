@@ -95,7 +95,7 @@ def grad_clipper_AVT(
     if do_clip:
         gradients, _ = tf.clip_by_global_norm(
             t_list=     gradients,
-            clip_norm=  clip_value if clip_value else gg_avt_norm,
+            clip_norm=  clip_value or gg_avt_norm,
             use_norm=   gg_norm)
         if verb > 0: print(f' >> is clipping gradients {"with value" if clip_value else "with AVT"}')
     elif verb > 0: print(' >> not doing clipping')

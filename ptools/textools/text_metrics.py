@@ -5,11 +5,6 @@
 """
 
 import Levenshtein
-import nltk
-import rouge
-
-from ptools.textools.tokenization import whitspace_tokenizer
-#from ptools.neuralmess.vext.gpt_encoder.bpencoder import get_encoder
 
 
 # returns Levenshtein-distance of two strings
@@ -40,75 +35,7 @@ def lev_distL(source :list or str, target :list or str):
 
     return dist[-1][-1]
 
-"""
-# returns bpe-tokens-Levenshtein-distance of two strings
-def lev_dist_bpe(source :str, target :str, bpe_enc=None):
-    if not bpe_enc: bpe_enc = get_encoder() # default (GPT) encoder
-    return lev_distL(bpe_enc.encode(source),bpe_enc.encode(target))
-"""
-
-# returns BLEU value
-def bleu(
-        sen :str,
-        ref :list or str,
-        ngram=      None,                   # set to 1,2,3,4 to override weights
-        weights=    (0.25,0.25,0.25,0.25)):
-
-    if type(ref) is str: ref = [ref]
-    reft = []
-    for r in ref:
-        reft.append(whitspace_tokenizer(r))
-    cndt = whitspace_tokenizer(sen)
-
-    if ngram:
-        if ngram == 1: weights = (1,  0,    0,   0)
-        if ngram == 2: weights = (0.5,0.5,  0,   0)
-        if ngram == 3: weights = (0.33,0.33,0.33,0)
-
-    sb = 0
-    try: sb = nltk.translate.bleu_score.sentence_bleu(reft, cndt, weights=weights)
-    except ValueError: pass
-
-    return sb
-
-# returns Rouge value/valueL
-def rouge_12L(
-        sen :str,
-        ref :str,
-        ev :rouge.Rouge=    None,
-        R1=                 True,
-        R2=                 True,
-        RL=                 True):
-
-    if not ev: ev = rouge.Rouge()
-    metrics = [0,0,0]
-    try:
-        metrics = ev.get_scores(sen,ref)
-        metrics = [
-            metrics[0]['rouge-1']['f'],
-            metrics[0]['rouge-2']['f'],
-            metrics[0]['rouge-l']['f']]
-    except ValueError: pass
-    rm = []
-    if R1: rm.append(metrics[0])
-    if R2: rm.append(metrics[1])
-    if RL: rm.append(metrics[2])
-    if len(rm) == 1: rm = rm[0]
-    return rm
-
 # selects two furthest (with lev_dist) of three sentences
 def two_most_distanced(sa :str,sb :str,sc :str):
     palev = [[lev_dist(*pair), pair] for pair in [[sa, sb], [sb, sc], [sc, sa]]]
     return sorted(palev)[-1][1]
-
-
-if __name__ == '__main__':
-
-    sen = 'My name is Piotr and I like to work with Andrey today.'
-    ref = 'His name is Andrey and he works for this company too.'
-
-    print('lev_dist:  %s'%lev_dist(sen,ref))
-    print('Bleu:      %s'%bleu(sen,ref))
-    print(lev_distL([0,5,1],[0,1,2,3]))
-    print(rouge_12L(sen,ref))
-    #print(lev_dist_bpe(sen,ref))

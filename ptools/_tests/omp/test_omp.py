@@ -1,8 +1,6 @@
 import numpy as np
 import random
-import spacy
 import time
-from typing import Any
 import unittest
 
 from ptools.mpython.mptools import MultiprocParam
@@ -97,37 +95,6 @@ class TestOMP(unittest.TestCase):
         results = ompr.process(tasks)
         print(len(results))
         self.assertEqual(len(tasks), len(results))
-
-    """
-    # example with spaCy model --> needs 'pl_core_news_sm' spacy model to be installed!
-    def test_OMP_spacy(self):
-
-        multiproc: MultiprocParam = 4
-
-        # spaCy model based RunningWorker
-        class SPP(RunningWorker):
-
-            def __init__(self, spacy_model_name: str):
-                RunningWorker.__init__(self)
-                print('loading model..')
-                self.model = spacy.load(spacy_model_name)
-                print('model loaded!')
-
-            def process(self, text: str) -> Any:
-                doc = self.model(text)
-                se = [(w.text, w.lemma_, w.tag_, w.pos_, w.dep_.lower()) for w in doc]
-                return se
-
-        tasks = [{'text': tx} for tx in ['To jest testowy text do sparsowania: Piła łańcuchowa posiada hamulec bezpieczeństwa i nowy system beznarzędziowej obsługi zespołu tnącego oraz automatyczny system smarowania prowadnicy i łańcucha. Ergonomiczna konstrukcja i niewielka waga ułatwiają pracę tą piłą. Świetna pilarka do prac profesjonalnych oraz do pracy w sadzie, ogrodzie czy na działce. To jest testowe zdanie do sparsowania. Piła łańcuchowa posiada hamulec bezpieczeństwa i nowy system beznarzędziowej obsługi zespołu tnącego oraz automatyczny system smarowania prowadnicy i łańcucha. Ergonomiczna konstrukcja i niewielka waga ułatwiają pracę tą piłą. Świetna pilarka do prac profesjonalnych oraz do pracy w sadzie, ogrodzie czy na działce. To jest testowe zdanie do sparsowania. Piła łańcuchowa posiada hamulec bezpieczeństwa i nowy system beznarzędziowej obsługi zespołu tnącego oraz automatyczny system smarowania prowadnicy i łańcucha. Ergonomiczna konstrukcja i niewielka waga ułatwiają pracę tą piłą. Świetna pilarka do prac profesjonalnych oraz do pracy w sadzie, ogrodzie czy na działce. To jest testowe zdanie do sparsowania. Piła łańcuchowa posiada hamulec bezpieczeństwa i nowy system beznarzędziowej obsługi zespołu tnącego oraz automatyczny system smarowania prowadnicy i łańcucha. Ergonomiczna konstrukcja i niewielka waga ułatwiają pracę tą piłą. Świetna pilarka do prac profesjonalnych oraz do pracy w sadzie, ogrodzie czy na działce.'] * 1000]
-
-        ompr = OMPRunner(
-            rw_class=       SPP,
-            rw_init_kwargs= {'spacy_model_name': 'pl_core_news_sm'},
-            multiproc=      multiproc,
-            verb=           1)
-        processed = ompr.process(tasks=tasks)
-        print(processed)
-    """
 
 
 if __name__ == '__main__':

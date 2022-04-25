@@ -3,7 +3,7 @@ import numpy as np
 import os
 import pandas as pd
 import plotly.express as px
-from scipy import stats as scst
+import scipy
 from typing import List
 
 from ptools.lipytools.little_methods import prep_folder
@@ -66,7 +66,7 @@ def histogram(
 
         # try build density, for some val_list it is not possible
         try:
-            density = scst.gaussian_kde(val_list)
+            density = scipy.stats.gaussian_kde(val_list)
             plt.plot(x, density(x))
         except: pass
 

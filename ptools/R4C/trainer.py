@@ -10,7 +10,6 @@ from abc import abstractmethod, ABC
 from collections import deque
 import numpy as np
 import random
-from scipy.stats import zscore
 from typing import List, Tuple, Optional
 
 from ptools.lipytools.moving_average import MovAvg
@@ -91,16 +90,11 @@ class Trainer(ABC):
 
         return list(dar)
 
-    # normalizes x with zscore (0 mean 1 std)
+    # normalizes x with zscore (0 mean 1 std), this is helpful for training, as rewards can vary considerably between episodes,
     @staticmethod
     def zscore_norm(x):
-        """
-            z-score is (x-mean(x))/stddev(x)
-            this is (?) helpful for training, as rewards can vary considerably between episodes,
-            which will have a bad impact over the loss minimization
-        """
         if len(x) < 2: return x
-        return zscore(x)
+        return (x - np.mean(x)) / np.std(x) + 0.00000001
 
     # updates Actor policy
     @abstractmethod

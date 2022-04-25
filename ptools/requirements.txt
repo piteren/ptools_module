@@ -1,15 +1,10 @@
 GPUtil
 Levenshtein
 matplotlib
-nltk
 numpy
 pandas
 plotly
 psutil
-regex
-rouge
 scipy
-sklearn
-spacy
 tensorflow
 typing-extensions==4.2.0

@@ -226,7 +226,7 @@ class NEModelBase(Subscriptable):
             sep_device=                     True,       # separate first device for variables, gradients_avg, optimizer (otherwise those ar placed on the first FWD calculations tower)
             collocate_GWO=                  False,      # collocates gradient calculations with tf.OPs (gradients are calculated on every tower with its operations, but remember that vars are on one device...) (otherwise with first FWD calculations tower)
             verb=                           0,
-            **kwargs):                              # here go params of FWD & OPT functions
+            **kwargs):                                  # here go params of FWD & OPT functions
 
         self.verb = verb
         self.name = name

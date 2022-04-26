@@ -7,4 +7,4 @@ plotly
 psutil
 scipy
 tensorflow
-typing-extensions==4.2.0
+typing-extensions

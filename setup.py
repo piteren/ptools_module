@@ -13,7 +13,7 @@ setup(
     author=             'Piotr Niewinski',
     author_email=       'pioniewinski@gmail.com',
     packages=           find_packages(),
-    version=            'v0.9.6',
+    version=            'v0.9.7',
     install_requires=   get_requirements(),
     license=            'MIT',
     license_files =     ('LICENSE.txt',),

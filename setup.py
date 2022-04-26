@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 # reads requirements from 'ptools/requirements.txt'
 def get_requirements():
     with open('ptools/requirements.txt') as file:
-        lines = [l[:-1] for l in file.readlines()]
+        lines = [l[:-1] if l[-1]=='\n' else l for l in file.readlines()]
         return lines
 
 
